@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+set -euo pipefail
+root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
+bin_dir=${WINDOW_WARD_BIN_DIR:-$HOME/.local/bin}
+bindings=${WINDOW_WARD_BINDINGS:-$HOME/.config/hypr/bindings.lua}
+link=$bin_dir/window-ward
+if [[ -L $link && $(readlink -f "$link") == "$root/bin/window-ward" ]]; then rm "$link"; fi
+if [[ -f $bindings ]]; then
+  sed -i '/^-- BEGIN WINDOW WARD (managed by setup)$/,/^-- END WINDOW WARD$/d' "$bindings"
+fi
+printf 'Window Ward integration removed; user configuration was preserved.\n'

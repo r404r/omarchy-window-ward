@@ -1,0 +1,16 @@
+#!/usr/bin/env bash
+set -euo pipefail
+root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
+bin_dir=${WINDOW_WARD_BIN_DIR:-$HOME/.local/bin}
+bindings=${WINDOW_WARD_BINDINGS:-$HOME/.config/hypr/bindings.lua}
+begin='-- BEGIN WINDOW WARD (managed by setup)'
+end='-- END WINDOW WARD'
+mkdir -p "$bin_dir" "${bindings%/*}"
+ln -sfn "$root/bin/window-ward" "$bin_dir/window-ward"
+[[ -e $bindings ]] || : >"$bindings"
+if ! grep -Fqx -- "$begin" "$bindings"; then
+  cp -a "$bindings" "$bindings.window-ward-backup.$(date +%Y%m%d%H%M%S)"
+  printf '\n%s\nhl.unbind("SUPER + W")\no.bind("SUPER + W", "Close window safely", "window-ward close")\n%s\n' "$begin" "$end" >>"$bindings"
+fi
+WINDOW_WARD_CONFIG=${WINDOW_WARD_CONFIG:-$HOME/.config/window-ward/config.json} "$root/bin/window-ward" status >/dev/null
+printf 'Window Ward installed. Run: hyprctl reload && hyprctl configerrors\n'

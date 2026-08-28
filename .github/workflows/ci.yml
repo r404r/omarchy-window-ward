@@ -1,0 +1,11 @@
+name: CI
+on: [push, pull_request]
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: sudo apt-get update && sudo apt-get install -y jq
+      - run: bash -n bin/window-ward scripts/setup scripts/uninstall tests/*.sh
+      - run: tests/test-window-ward.sh
+      - run: tests/test-setup.sh

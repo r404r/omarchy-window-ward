@@ -1,0 +1,18 @@
+{
+  "schemaVersion": 1,
+  "id": "io.github.r404r.window-ward",
+  "name": "Window Ward",
+  "version": "0.1.0",
+  "author": "r404r",
+  "license": "MIT",
+  "description": "Protect selected applications from accidental window closes.",
+  "kinds": ["bar-widget"],
+  "entryPoints": { "barWidget": "BarWidget.qml" },
+  "barWidget": {
+    "displayName": "Window Ward",
+    "description": "Manage application-specific close protection",
+    "category": "Desktop",
+    "allowMultiple": false,
+    "defaultSection": "right"
+  }
+}

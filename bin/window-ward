@@ -1,0 +1,108 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+config_file=${WINDOW_WARD_CONFIG:-${XDG_CONFIG_HOME:-$HOME/.config}/window-ward/config.json}
+state_file=${WINDOW_WARD_STATE:-${XDG_RUNTIME_DIR:?XDG_RUNTIME_DIR is required}/window-ward.state}
+hyprctl_bin=${WINDOW_WARD_HYPRCTL:-hyprctl}
+notify_bin=${WINDOW_WARD_NOTIFY:-omarchy}
+
+die() { printf 'window-ward: %s\n' "$*" >&2; exit 1; }
+need() { command -v "$1" >/dev/null || die "required command not found: $1"; }
+
+default_config() {
+  jq -n '{schemaVersion:1,enabled:true,confirmWindowMs:3000,protectedApplications:[{id:"google-chrome",name:"Google Chrome",enabled:true,mode:"double-press",match:{class:["google-chrome","chromium","chrome-*"]}}]}'
+}
+
+ensure_config() {
+  need jq
+  if [[ ! -e $config_file ]]; then
+    mkdir -p "${config_file%/*}"
+    umask 077
+    default_config >"$config_file"
+  fi
+  jq -e '.schemaVersion == 1 and (.enabled|type == "boolean") and (.confirmWindowMs|type == "number") and (.protectedApplications|type == "array")' "$config_file" >/dev/null ||
+    die "invalid configuration: $config_file"
+}
+
+atomic_filter() {
+  local tmp
+  tmp=$(mktemp "${config_file}.XXXXXX")
+  if jq "$@" "$config_file" >"$tmp"; then chmod 600 "$tmp"; mv -f "$tmp" "$config_file"; else rm -f "$tmp"; return 1; fi
+}
+
+active_window() { "$hyprctl_bin" activewindow -j; }
+
+is_protected() {
+  local class=${1,,} initial=${2,,} encoded rule enabled pattern matched has_patterns
+  while IFS= read -r encoded; do
+    rule=$(base64 -d <<<"$encoded")
+    enabled=$(jq -r '.enabled // true' <<<"$rule")
+    [[ $enabled == true ]] || continue
+    matched=true
+    has_patterns=$(jq -r '(.match.class // []) | length' <<<"$rule")
+    if ((has_patterns > 0)); then
+      matched=false
+      while IFS= read -r pattern; do [[ $class == ${pattern,,} ]] && matched=true; done < <(jq -r '.match.class[]' <<<"$rule")
+    fi
+    [[ $matched == true ]] || continue
+    has_patterns=$(jq -r '(.match.initialClass // []) | length' <<<"$rule")
+    if ((has_patterns > 0)); then
+      matched=false
+      while IFS= read -r pattern; do [[ $initial == ${pattern,,} ]] && matched=true; done < <(jq -r '.match.initialClass[]' <<<"$rule")
+    fi
+    [[ $matched == true ]] && return 0
+  done < <(jq -r '.protectedApplications[] | @base64' "$config_file")
+  return 1
+}
+
+close_window() {
+  ensure_config
+  local json address class initial now previous_address= previous_time=0 timeout
+  json=$(active_window)
+  address=$(jq -r '.address // empty' <<<"$json")
+  class=$(jq -r '.class // empty' <<<"$json")
+  initial=$(jq -r '.initialClass // empty' <<<"$json")
+  [[ $address =~ ^0x[0-9a-fA-F]+$ ]] || [[ $address =~ ^[0-9a-fA-F]+$ ]] || die "unexpected window address"
+  if [[ $(jq -r '.enabled' "$config_file") != true ]] || ! is_protected "$class" "$initial"; then
+    rm -f -- "$state_file"
+    "$hyprctl_bin" eval "hl.dispatch(hl.dsp.window.close({ window = \"address:$address\" }))"
+    return
+  fi
+  need flock
+  exec 9>"${state_file}.lock"
+  flock -x 9
+  now=$(date +%s%3N); timeout=$(jq -r '.confirmWindowMs' "$config_file")
+  [[ -r $state_file ]] && read -r previous_address previous_time <"$state_file" || true
+  if [[ $address == "$previous_address" ]] && (( now - previous_time <= timeout )); then
+    rm -f -- "$state_file"
+    "$hyprctl_bin" eval "hl.dispatch(hl.dsp.window.close({ window = \"address:$address\" }))"
+  else
+    umask 077; printf '%s %s\n' "$address" "$now" >"$state_file"
+    "$notify_bin" notification send -u normal -t "$timeout" "Window Ward" "Press Super+W again to close $class" || true
+  fi
+}
+
+add_focused() {
+  ensure_config
+  local json class initial id name
+  json=$(active_window); class=$(jq -r '.class // empty' <<<"$json"); initial=$(jq -r '.initialClass // empty' <<<"$json")
+  [[ -n $class ]] || die "focused window has no class"
+  id=$(tr '[:upper:] _' '[:lower:]--' <<<"$class" | tr -cd 'a-z0-9.-'); name=${1:-$class}
+  atomic_filter --arg id "$id" --arg name "$name" --arg class "$class" --arg initial "$initial" '
+    .protectedApplications |= map(select(.id != $id)) + [{id:$id,name:$name,enabled:true,mode:"double-press",match:({class:[$class]} + if $initial == "" or $initial == $class then {} else {initialClass:[$initial]} end)}]'
+  printf 'Added %s (%s)\n' "$name" "$class"
+}
+
+case ${1:-help} in
+  close) close_window ;;
+  status) ensure_config; jq '{schemaVersion,enabled,confirmWindowMs,protectedApplications}' "$config_file" ;;
+  list) ensure_config; jq -r '.protectedApplications[] | "\(.id)\t\(.enabled // true)\t\(.name)\t\((.match.class // []) | join(", "))"' "$config_file" ;;
+  add-focused) shift; add_focused "${1:-}" ;;
+  remove) ensure_config; [[ -n ${2:-} ]] || die 'usage: window-ward remove ID'; atomic_filter --arg id "$2" '.protectedApplications |= map(select(.id != $id))' ;;
+  enable) ensure_config; atomic_filter '.enabled = true' ;;
+  disable) ensure_config; atomic_filter '.enabled = false' ;;
+  timeout) ensure_config; [[ ${2:-} =~ ^[1-9][0-9]{2,5}$ ]] || die 'timeout must be 100-999999 milliseconds'; atomic_filter --argjson ms "$2" '.confirmWindowMs = $ms' ;;
+  doctor) ensure_config; need "$hyprctl_bin"; printf 'config: ok\nhyprctl: ok\n' ;;
+  help|-h|--help) printf '%s\n' 'Usage: window-ward {close|status|list|add-focused [NAME]|remove ID|enable|disable|timeout MS|doctor}' ;;
+  *) die "unknown command: $1" ;;
+esac

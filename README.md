@@ -3,6 +3,8 @@
 Window Ward protects selected applications from an accidental `Super+W`. The first press warns;
 pressing the shortcut again on the same window within the configured interval closes it normally.
 
+![Window Ward panel showing per-application controls](docs/screenshots/window-ward-panel.png)
+
 ## Requirements
 
 - Verified with Omarchy 4.0.1 / Hyprland 0.56.2

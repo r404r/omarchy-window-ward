@@ -11,3 +11,4 @@ jobs:
       - run: jq -e . manifest.json
       - run: tests/test-window-ward.sh
       - run: tests/test-setup.sh
+      - run: tests/test-panel-theme.sh

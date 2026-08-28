@@ -13,6 +13,8 @@ Panel {
   property string output: "Loading…"
   readonly property string cliPath: Quickshell.env("HOME") + "/.local/bin/window-ward"
   readonly property bool busy: refresh.running || toggleProtection.running
+  readonly property color popupForeground: Color.popups.text
+  readonly property color popupBackground: Color.popups.background
   function open() { refresh.running = true; root.controller.show() }
   function close() { root.controller.hide() }
   function toggle() { root.opened ? close() : open() }
@@ -45,15 +47,15 @@ Panel {
       id: keyCatcher; anchors.fill: parent; onCloseRequested: root.close(); onTabRequested: function(direction) { root.switchPanel(direction) }
       Column {
         id: content; width: parent.width; spacing: Style.space(10)
-        Text { text: "Window Ward"; color: root.barForeground; font.bold: true; font.pixelSize: Style.font.subtitle }
-        Text { width: parent.width; text: root.output; color: root.barForeground; wrapMode: Text.WrapAnywhere; font.family: "monospace" }
+        Text { text: "Window Ward"; color: root.popupForeground; font.bold: true; font.pixelSize: Style.font.subtitle }
+        Text { width: parent.width; text: root.output; color: root.popupForeground; wrapMode: Text.WrapAnywhere; font.family: "monospace" }
         Row {
           spacing: Style.space(8)
-          Rectangle { width: 100; height: 32; radius: 6; opacity: root.busy ? 0.5 : 1; color: root.barForeground; Text { anchors.centerIn: parent; text: "Enable"; color: Color.background } MouseArea { anchors.fill: parent; enabled: !root.busy; onClicked: { toggleProtection.enable = true; toggleProtection.running = true } } }
-          Rectangle { width: 100; height: 32; radius: 6; opacity: root.busy ? 0.5 : 1; color: root.barForeground; Text { anchors.centerIn: parent; text: "Disable"; color: Color.background } MouseArea { anchors.fill: parent; enabled: !root.busy; onClicked: { toggleProtection.enable = false; toggleProtection.running = true } } }
-          Rectangle { width: 100; height: 32; radius: 6; opacity: root.busy ? 0.5 : 1; color: root.barForeground; Text { anchors.centerIn: parent; text: "Refresh"; color: Color.background } MouseArea { anchors.fill: parent; enabled: !root.busy; onClicked: refresh.running = true } }
+          Rectangle { width: 100; height: 32; radius: 6; opacity: root.busy ? 0.5 : 1; color: root.popupForeground; Text { anchors.centerIn: parent; text: "Enable"; color: root.popupBackground } MouseArea { anchors.fill: parent; enabled: !root.busy; onClicked: { toggleProtection.enable = true; toggleProtection.running = true } } }
+          Rectangle { width: 100; height: 32; radius: 6; opacity: root.busy ? 0.5 : 1; color: root.popupForeground; Text { anchors.centerIn: parent; text: "Disable"; color: root.popupBackground } MouseArea { anchors.fill: parent; enabled: !root.busy; onClicked: { toggleProtection.enable = false; toggleProtection.running = true } } }
+          Rectangle { width: 100; height: 32; radius: 6; opacity: root.busy ? 0.5 : 1; color: root.popupForeground; Text { anchors.centerIn: parent; text: "Refresh"; color: root.popupBackground } MouseArea { anchors.fill: parent; enabled: !root.busy; onClicked: refresh.running = true } }
         }
-        Text { width: parent.width; text: "Add focused apps from a terminal: window-ward add-focused"; color: root.barForeground; opacity: 0.75; wrapMode: Text.WordWrap }
+        Text { width: parent.width; text: "Add focused apps from a terminal: window-ward add-focused"; color: root.popupForeground; opacity: 0.75; wrapMode: Text.WordWrap }
       }
     }
   }

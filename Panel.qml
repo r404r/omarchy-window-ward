@@ -17,9 +17,26 @@ Panel {
   property int focusIndex: 0
   property string errorText: ""
   property string pendingRemovalId: ""
+  property string statusOutput: ""
+  property bool statusOutputOverflow: false
+  property bool statusFinishing: false
+  property int statusGeneration: 0
+
+  // The panel is a trust boundary: the CLI, its configuration, and Hyprland
+  // can all ultimately provide this data. Keep its retained state deliberately
+  // small even when a broken or replaced command writes without stopping.
+  // The CLI accepts a 64 KiB config, then normalizes optional match fields
+  // before serializing status. 128 KiB accepts every valid normalized status
+  // with margin while still bounding retained panel memory.
+  readonly property int maxStatusOutputChars: 131072
+  readonly property int maxApplications: 128
+  readonly property int maxMatchersPerApplication: 32
+  readonly property int maxApplicationIdChars: 128
+  readonly property int maxApplicationNameChars: 256
+  readonly property int maxMatcherChars: 256
 
   readonly property string cliPath: Quickshell.env("HOME") + "/.local/bin/window-ward"
-  readonly property bool busy: statusProcess.running || toggleProcess.running || addProcess.running
+  readonly property bool busy: statusProcess.running || statusFinishing || toggleProcess.running || addProcess.running
     || applicationToggleProcess.running || removeProcess.running
   readonly property color foreground: Color.popups.text
   readonly property color mutedForeground: Qt.darker(foreground, 1.45)
@@ -49,7 +66,13 @@ Panel {
   function refresh() {
     root.pendingRemovalId = ""
     removalConfirmationTimer.stop()
-    if (!statusProcess.running) statusProcess.running = true
+    if (!statusProcess.running && !root.statusFinishing) {
+      root.statusGeneration += 1
+      root.statusOutput = ""
+      root.statusOutputOverflow = false
+      statusProcess.requestGeneration = root.statusGeneration
+      statusProcess.running = true
+    }
   }
 
   function setProtection(enabled) {
@@ -118,6 +141,77 @@ Panel {
     return application.match.class
   }
 
+  function boundedDisplayText(value, maximumLength) {
+    var text = String(value === undefined || value === null ? "" : value)
+      .replace(/[\u0000-\u001f\u007f]/g, " ")
+    return text.length > maximumLength ? text.slice(0, maximumLength - 1) + "…" : text
+  }
+
+  function sanitizedMatcherList(values) {
+    if (!(values instanceof Array)) return []
+    var result = []
+    for (var index = 0; index < values.length && result.length < root.maxMatchersPerApplication; index++) {
+      var matcher = root.boundedDisplayText(values[index], root.maxMatcherChars)
+      if (matcher.length > 0) result.push(matcher)
+    }
+    return result
+  }
+
+  function sanitizedApplications(values) {
+    if (!(values instanceof Array)) return []
+    var result = []
+    for (var index = 0; index < values.length && result.length < root.maxApplications; index++) {
+      var application = values[index]
+      if (!application || typeof application !== "object") continue
+      var id = String(application.id === undefined || application.id === null ? "" : application.id)
+      if (!id || id.length > root.maxApplicationIdChars || /[\u0000-\u001f\u007f]/.test(id)) continue
+      var match = application.match && typeof application.match === "object" ? application.match : {}
+      result.push({
+        id: id,
+        name: root.boundedDisplayText(application.name || id, root.maxApplicationNameChars),
+        enabled: application.enabled === true,
+        match: {
+          class: root.sanitizedMatcherList(match.class),
+          initialClass: root.sanitizedMatcherList(match.initialClass)
+        }
+      })
+    }
+    return result
+  }
+
+  function appendStatusOutput(chunk) {
+    if (root.statusOutputOverflow) return
+    var value = String(chunk)
+    var remaining = root.maxStatusOutputChars - root.statusOutput.length
+    if (remaining <= 0 || value.length > remaining) {
+      root.statusOutputOverflow = true
+      return
+    }
+    root.statusOutput += value
+  }
+
+  function finishStatus(exitCode, generation) {
+    if (generation !== root.statusGeneration) return
+    root.statusFinishing = false
+    if (exitCode !== 0) {
+      root.errorText = "Window Ward is unavailable. Run setup or doctor."
+      return
+    }
+    if (root.statusOutputOverflow) {
+      root.errorText = "Window Ward status was too large to display safely."
+      return
+    }
+    try {
+      var state = JSON.parse(root.statusOutput || "{}")
+      root.protectionEnabled = state.enabled === true
+      root.applications = root.sanitizedApplications(state.protectedApplications)
+      root.focusIndex = Math.min(root.focusIndex, 2 + root.applications.length * 2)
+      root.errorText = ""
+    } catch (error) {
+      root.errorText = "Could not read Window Ward status."
+    }
+  }
+
   function applicationIcon(application) {
     var candidates = [String((application && application.id) || "")]
       .concat(root.matchingClasses(application))
@@ -125,7 +219,9 @@ Panel {
       candidates = candidates.concat(application.match.initialClass)
     for (var index = 0; index < candidates.length; index++) {
       var candidate = String(candidates[index] || "")
-      if (!candidate || candidate.indexOf("*") !== -1 || candidate.indexOf("?") !== -1) continue
+      // iconPath accepts more than icon-theme names. Only hand it a compact
+      // icon-theme identifier, never an application-controlled path or URL.
+      if (!/^[A-Za-z0-9][A-Za-z0-9._+-]{0,127}$/.test(candidate)) continue
       var themed = Quickshell.iconPath(candidate, true)
       if (themed.length > 0) return themed
     }
@@ -140,31 +236,24 @@ Panel {
 
   Process {
     id: statusProcess
+    property int requestGeneration: 0
     command: [root.cliPath, "status"]
 
-    stdout: StdioCollector {
-      waitForEnd: true
-      onStreamFinished: {
-        try {
-          var state = JSON.parse(text || "{}")
-          root.protectionEnabled = state.enabled === true
-          root.applications = state.protectedApplications instanceof Array ? state.protectedApplications : []
-          root.focusIndex = Math.min(root.focusIndex, 2 + root.applications.length * 2)
-          root.errorText = ""
-        } catch (error) {
-          root.errorText = "Could not read Window Ward status."
-        }
-      }
+    stdout: SplitParser {
+      splitMarker: ""
+      onRead: function(chunk) { root.appendStatusOutput(chunk) }
     }
 
-    stderr: StdioCollector {
-      id: statusStderr
-      waitForEnd: true
+    stderr: SplitParser {
+      splitMarker: ""
+      // Deliberately consume without retaining diagnostics from a child process.
+      onRead: function(chunk) {}
     }
 
     onExited: function(exitCode) {
-      if (exitCode !== 0)
-        root.errorText = statusStderr.text.trim() || "Window Ward is unavailable. Run setup or doctor."
+      var generation = requestGeneration
+      root.statusFinishing = true
+      Qt.callLater(function() { root.finishStatus(exitCode, generation) })
     }
   }
 
@@ -173,14 +262,14 @@ Panel {
     property bool enable: true
     command: [root.cliPath, enable ? "enable" : "disable"]
 
-    stderr: StdioCollector {
-      id: toggleStderr
-      waitForEnd: true
+    stderr: SplitParser {
+      splitMarker: ""
+      onRead: function(chunk) {}
     }
 
     onExited: function(exitCode) {
       if (exitCode === 0) root.refresh()
-      else root.errorText = toggleStderr.text.trim() || "Could not change protection."
+      else root.errorText = "Could not change protection."
     }
   }
 
@@ -188,14 +277,14 @@ Panel {
     id: addProcess
     command: [root.cliPath, "add-focused"]
 
-    stderr: StdioCollector {
-      id: addStderr
-      waitForEnd: true
+    stderr: SplitParser {
+      splitMarker: ""
+      onRead: function(chunk) {}
     }
 
     onExited: function(exitCode) {
       if (exitCode === 0) root.refresh()
-      else root.errorText = addStderr.text.trim() || "Could not add the focused application."
+      else root.errorText = "Could not add the focused application."
     }
   }
 
@@ -205,14 +294,14 @@ Panel {
     property bool enable: true
     command: [root.cliPath, "set-app-enabled", applicationId, enable ? "true" : "false"]
 
-    stderr: StdioCollector {
-      id: applicationToggleStderr
-      waitForEnd: true
+    stderr: SplitParser {
+      splitMarker: ""
+      onRead: function(chunk) {}
     }
 
     onExited: function(exitCode) {
       if (exitCode === 0) root.refresh()
-      else root.errorText = applicationToggleStderr.text.trim() || "Could not change this application."
+      else root.errorText = "Could not change this application."
     }
   }
 
@@ -221,9 +310,9 @@ Panel {
     property string applicationId: ""
     command: [root.cliPath, "remove", applicationId]
 
-    stderr: StdioCollector {
-      id: removeStderr
-      waitForEnd: true
+    stderr: SplitParser {
+      splitMarker: ""
+      onRead: function(chunk) {}
     }
 
     onExited: function(exitCode) {
@@ -232,7 +321,7 @@ Panel {
         root.refresh()
       } else {
         root.pendingRemovalId = ""
-        root.errorText = removeStderr.text.trim() || "Could not remove this application."
+        root.errorText = "Could not remove this application."
       }
     }
   }
@@ -423,6 +512,7 @@ Panel {
                 Text {
                   width: parent.width
                   text: String(modelData.name || modelData.id || "Unnamed application")
+                  textFormat: Text.PlainText
                   color: root.foreground
                   font.family: root.fontFamily
                   font.pixelSize: Style.font.subtitle
@@ -475,6 +565,7 @@ Panel {
               width: parent.width
               leftPadding: Style.space(48)
               text: root.matchingClasses(modelData).join("  ·  ")
+              textFormat: Text.PlainText
               color: root.mutedForeground
               font.family: "monospace"
               font.pixelSize: Style.font.caption
@@ -498,6 +589,7 @@ Panel {
           visible: root.errorText !== ""
           width: parent.width
           text: root.errorText
+          textFormat: Text.PlainText
           color: Color.urgent
           font.family: root.fontFamily
           font.pixelSize: Style.font.bodySmall

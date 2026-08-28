@@ -1,27 +1,3 @@
-#!/usr/bin/env bash
-set -euo pipefail
-umask 077
-root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
-bin_dir=$HOME/.local/bin
-if [[ ${WINDOW_WARD_TESTING:-} == 1 ]]; then bin_dir=${WINDOW_WARD_BIN_DIR:-$bin_dir}; fi
-bindings=${WINDOW_WARD_BINDINGS:-$HOME/.config/hypr/bindings.lua}
-link=$bin_dir/window-ward
-[[ $link != *'"'* && $link != *\\* && $link != *$'\n'* && $link != *[[:space:]]* ]] || { echo 'Window Ward: install path cannot contain quotes, backslashes, or whitespace' >&2; exit 1; }
-if [[ -f $bindings ]]; then
-  cli="$bin_dir/window-ward"
-  block=$(printf '%s\nhl.unbind("SUPER + W")\no.bind("SUPER + W", "Close window safely", "%s close")\n%s' '-- BEGIN WINDOW WARD (managed by setup)' "$cli" '-- END WINDOW WARD')
-  begin_count=$(grep -Fxc -- '-- BEGIN WINDOW WARD (managed by setup)' "$bindings" || true)
-  end_count=$(grep -Fxc -- '-- END WINDOW WARD' "$bindings" || true)
-  ((begin_count == end_count && begin_count <= 1)) || { echo 'Window Ward: malformed or duplicate managed block; refusing to remove' >&2; exit 1; }
-  if ((begin_count == 1)); then
-    existing=$(sed -n '/^-- BEGIN WINDOW WARD (managed by setup)$/,/^-- END WINDOW WARD$/p' "$bindings")
-    [[ $existing == "$block" ]] || { echo 'Window Ward: managed block was modified; refusing to remove it' >&2; exit 1; }
-    cp -a "$bindings" "$bindings.window-ward-uninstall-backup.$(date +%Y%m%d%H%M%S)"
-    tmp=$(mktemp "${bindings}.XXXXXX")
-    awk 'BEGIN {skip=0} /^-- BEGIN WINDOW WARD \(managed by setup\)$/ {skip=1; next} /^-- END WINDOW WARD$/ {skip=0; next} !skip {print}' "$bindings" >"$tmp"
-    chmod --reference="$bindings" "$tmp"
-    mv -f "$tmp" "$bindings"
-  fi
-fi
-if [[ -L $link && $(readlink -f "$link") == "$root/bin/window-ward" ]]; then rm "$link"; fi
-printf 'Window Ward integration removed; user configuration was preserved.\n'
+#!/usr/bin/env python3
+from window_ward_integration import main
+main("uninstall")

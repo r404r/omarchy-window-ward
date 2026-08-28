@@ -6,8 +6,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - run: sudo apt-get update && sudo apt-get install -y jq shellcheck
-      - run: bash -n bin/window-ward scripts/setup scripts/uninstall tests/*.sh
-      - run: shellcheck bin/window-ward scripts/setup scripts/uninstall tests/*.sh
+      - run: cache_dir=$(mktemp -d); trap 'rm -rf "$cache_dir"' EXIT; PYTHONPYCACHEPREFIX="$cache_dir" python3 -m py_compile bin/window-ward scripts/window_ward_integration.py scripts/setup scripts/uninstall
+      - run: bash -n tests/*.sh
+      - run: shellcheck tests/*.sh
       - run: jq -e . manifest.json
       - run: tests/test-window-ward.sh
       - run: tests/test-setup.sh

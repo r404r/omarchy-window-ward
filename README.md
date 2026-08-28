@@ -8,7 +8,7 @@ pressing the shortcut again on the same window within the configured interval cl
 ## Requirements
 
 - Verified with Omarchy 4.0.1 / Hyprland 0.56.2
-- Bash, jq, util-linux (`flock`) and hyprctl
+- Python 3.10 or newer and hyprctl
 
 ## Install
 
@@ -37,6 +37,7 @@ window-ward doctor
 
 Configuration is stored at `~/.config/window-ward/config.json`. Matching uses window class and
 initialClass; Window Ward never needs browser URLs, profiles, titles, passwords or tokens.
+Configuration input is capped at 48 KiB and the `status` JSON response at 64 KiB.
 The panel resolves each icon automatically from the application rule ID, then its exact class and
 initialClass values, using the active system icon theme; a generic application icon is the final fallback.
 Each list row can be paused independently or removed after a second confirmation click.
@@ -63,7 +64,9 @@ Also remove a dangling installer link only after verifying that it is a symlink:
 ```sh
 tests/test-window-ward.sh
 tests/test-setup.sh
-bash -n bin/window-ward scripts/setup scripts/uninstall tests/*.sh
+python -B bin/window-ward --help >/dev/null
+cache_dir=$(mktemp -d); trap 'rm -rf "$cache_dir"' EXIT; PYTHONPYCACHEPREFIX="$cache_dir" python -m py_compile scripts/window_ward_integration.py scripts/setup scripts/uninstall
+bash -n tests/*.sh
 omarchy plugin validate "$PWD"
 QMLLINT=${QMLLINT:-/usr/lib/qt6/bin/qmllint}
 "$QMLLINT" -I "$OMARCHY_PATH/shell" BarWidget.qml Panel.qml

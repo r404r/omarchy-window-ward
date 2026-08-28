@@ -16,17 +16,23 @@ Panel {
   property bool protectionEnabled: false
   property int focusIndex: 0
   property string errorText: ""
+  property string pendingRemovalId: ""
 
   readonly property string cliPath: Quickshell.env("HOME") + "/.local/bin/window-ward"
   readonly property bool busy: statusProcess.running || toggleProcess.running || addProcess.running
+    || applicationToggleProcess.running || removeProcess.running
   readonly property color foreground: Color.popups.text
   readonly property color mutedForeground: Qt.darker(foreground, 1.45)
   readonly property color accent: Color.accent
   readonly property string fontFamily: root.bar ? root.bar.fontFamily : Style.font.family
+  readonly property int globalToggleFocusIndex: 1 + root.applications.length * 2
+  readonly property int addFocusIndex: root.globalToggleFocusIndex + 1
+  readonly property int focusTargetCount: root.addFocusIndex + 1
 
   function open() {
     root.controller.show()
     root.focusIndex = 0
+    root.pendingRemovalId = ""
     root.refresh()
     Qt.callLater(function() { keyCatcher.forceActiveFocus() })
   }
@@ -41,6 +47,8 @@ Panel {
   }
 
   function refresh() {
+    root.pendingRemovalId = ""
+    removalConfirmationTimer.stop()
     if (!statusProcess.running) statusProcess.running = true
   }
 
@@ -52,13 +60,29 @@ Panel {
   }
 
   function moveFocus(delta) {
-    root.focusIndex = (root.focusIndex + (delta > 0 ? 1 : -1) + 3) % 3
+    root.focusIndex = (root.focusIndex + (delta > 0 ? 1 : -1) + root.focusTargetCount)
+      % root.focusTargetCount
   }
 
   function activateFocused() {
-    if (root.focusIndex === 0) root.refresh()
-    else if (root.focusIndex === 1) root.setProtection(!root.protectionEnabled)
-    else root.addFocusedApplication()
+    if (root.focusIndex === 0) {
+      root.refresh()
+      return
+    }
+    if (root.focusIndex < root.globalToggleFocusIndex) {
+      var applicationIndex = Math.floor((root.focusIndex - 1) / 2)
+      var application = root.applications[applicationIndex]
+      if (!application) return
+      if ((root.focusIndex - 1) % 2 === 0)
+        root.setApplicationEnabled(String(application.id), application.enabled !== true)
+      else
+        root.requestApplicationRemoval(String(application.id))
+      return
+    }
+    if (root.focusIndex === root.globalToggleFocusIndex)
+      root.setProtection(!root.protectionEnabled)
+    else
+      root.addFocusedApplication()
   }
 
   function addFocusedApplication() {
@@ -67,9 +91,51 @@ Panel {
     addProcess.running = true
   }
 
+  function setApplicationEnabled(applicationId, enabled) {
+    if (root.busy || !applicationId) return
+    root.errorText = ""
+    root.pendingRemovalId = ""
+    applicationToggleProcess.applicationId = applicationId
+    applicationToggleProcess.enable = enabled
+    applicationToggleProcess.running = true
+  }
+
+  function requestApplicationRemoval(applicationId) {
+    if (root.busy || !applicationId) return
+    if (root.pendingRemovalId !== applicationId) {
+      root.pendingRemovalId = applicationId
+      removalConfirmationTimer.restart()
+      return
+    }
+    removalConfirmationTimer.stop()
+    root.errorText = ""
+    removeProcess.applicationId = applicationId
+    removeProcess.running = true
+  }
+
   function matchingClasses(application) {
     if (!application || !application.match || !(application.match.class instanceof Array)) return []
     return application.match.class
+  }
+
+  function applicationIcon(application) {
+    var candidates = [String((application && application.id) || "")]
+      .concat(root.matchingClasses(application))
+    if (application && application.match && application.match.initialClass instanceof Array)
+      candidates = candidates.concat(application.match.initialClass)
+    for (var index = 0; index < candidates.length; index++) {
+      var candidate = String(candidates[index] || "")
+      if (!candidate || candidate.indexOf("*") !== -1 || candidate.indexOf("?") !== -1) continue
+      var themed = Quickshell.iconPath(candidate, true)
+      if (themed.length > 0) return themed
+    }
+    return Quickshell.iconPath("application-x-executable", true)
+  }
+
+  Timer {
+    id: removalConfirmationTimer
+    interval: 5000
+    onTriggered: root.pendingRemovalId = ""
   }
 
   Process {
@@ -83,6 +149,7 @@ Panel {
           var state = JSON.parse(text || "{}")
           root.protectionEnabled = state.enabled === true
           root.applications = state.protectedApplications instanceof Array ? state.protectedApplications : []
+          root.focusIndex = Math.min(root.focusIndex, 2 + root.applications.length * 2)
           root.errorText = ""
         } catch (error) {
           root.errorText = "Could not read Window Ward status."
@@ -129,6 +196,44 @@ Panel {
     onExited: function(exitCode) {
       if (exitCode === 0) root.refresh()
       else root.errorText = addStderr.text.trim() || "Could not add the focused application."
+    }
+  }
+
+  Process {
+    id: applicationToggleProcess
+    property string applicationId: ""
+    property bool enable: true
+    command: [root.cliPath, "set-app-enabled", applicationId, enable ? "true" : "false"]
+
+    stderr: StdioCollector {
+      id: applicationToggleStderr
+      waitForEnd: true
+    }
+
+    onExited: function(exitCode) {
+      if (exitCode === 0) root.refresh()
+      else root.errorText = applicationToggleStderr.text.trim() || "Could not change this application."
+    }
+  }
+
+  Process {
+    id: removeProcess
+    property string applicationId: ""
+    command: [root.cliPath, "remove", applicationId]
+
+    stderr: StdioCollector {
+      id: removeStderr
+      waitForEnd: true
+    }
+
+    onExited: function(exitCode) {
+      if (exitCode === 0) {
+        root.pendingRemovalId = ""
+        root.refresh()
+      } else {
+        root.pendingRemovalId = ""
+        root.errorText = removeStderr.text.trim() || "Could not remove this application."
+      }
     }
   }
 
@@ -278,6 +383,13 @@ Panel {
           clip: true
           boundsBehavior: Flickable.StopAtBounds
           interactive: contentHeight > height
+          currentIndex: root.focusIndex > 0 && root.focusIndex < root.globalToggleFocusIndex
+            ? Math.floor((root.focusIndex - 1) / 2)
+            : -1
+          onCurrentIndexChanged: {
+            if (currentIndex >= 0)
+              Qt.callLater(function() { applicationList.positionViewAtIndex(currentIndex, ListView.Contain) })
+          }
           QtControls.ScrollBar.vertical: QtControls.ScrollBar {
             policy: QtControls.ScrollBar.AsNeeded
           }
@@ -285,6 +397,7 @@ Panel {
 
           delegate: Column {
             required property var modelData
+            required property int index
             width: applicationList.width
             height: implicitHeight
             spacing: Style.space(8)
@@ -297,13 +410,14 @@ Panel {
                 width: Style.space(38)
                 height: width
                 anchors.verticalCenter: parent.verticalCenter
-                source: Quickshell.iconPath(modelData.id || "application-x-executable", true)
+                source: root.applicationIcon(modelData)
                 fillMode: Image.PreserveAspectFit
                 smooth: true
               }
 
               Column {
-                width: parent.width - enabledSwitch.width - parent.spacing * 2 - Style.space(38)
+                width: parent.width - enabledSwitch.width - removeButton.width
+                  - parent.spacing * 3 - Style.space(38)
                 spacing: Style.space(2)
 
                 Text {
@@ -328,10 +442,32 @@ Panel {
               ToggleSwitch {
                 id: enabledSwitch
                 checked: modelData.enabled === true
-                interactive: false
+                interactive: true
+                busy: root.busy
+                hasCursor: root.focusIndex === 1 + index * 2
                 foreground: root.foreground
                 accent: root.accent
                 anchors.verticalCenter: parent.verticalCenter
+                onToggled: root.setApplicationEnabled(String(modelData.id), !checked)
+                onHovered: function(hovered) { if (hovered) root.focusIndex = 1 + index * 2 }
+              }
+
+              Button {
+                id: removeButton
+                width: Style.space(root.pendingRemovalId === String(modelData.id) ? 82 : 70)
+                text: root.pendingRemovalId === String(modelData.id) ? "Confirm" : "Remove"
+                tooltipText: root.pendingRemovalId === String(modelData.id)
+                  ? "Click again to remove this rule"
+                  : "Remove this application from protection"
+                bordered: root.pendingRemovalId === String(modelData.id)
+                focusable: true
+                hasCursor: root.focusIndex === 2 + index * 2
+                enabled: !root.busy
+                foreground: Color.urgent
+                fontFamily: root.fontFamily
+                anchors.verticalCenter: parent.verticalCenter
+                onClicked: root.requestApplicationRemoval(String(modelData.id))
+                onHovered: function(hovered) { if (hovered) root.focusIndex = 2 + index * 2 }
               }
             }
 
@@ -385,13 +521,13 @@ Panel {
               ? "Enabled for all listed applications"
               : "Paused for all listed applications"
             checked: root.protectionEnabled
-            hasCursor: root.focusIndex === 1
+            hasCursor: root.focusIndex === root.globalToggleFocusIndex
             enabled: !root.busy
             foreground: root.foreground
             accent: root.accent
             fontFamily: root.fontFamily
             onClicked: root.setProtection(!root.protectionEnabled)
-            onHovered: function(hovered) { if (hovered) root.focusIndex = 1 }
+            onHovered: function(hovered) { if (hovered) root.focusIndex = root.globalToggleFocusIndex }
           }
 
           Button {
@@ -402,12 +538,12 @@ Panel {
             tooltipText: "Protect the currently focused application"
             bordered: false
             focusable: true
-            hasCursor: root.focusIndex === 2
+            hasCursor: root.focusIndex === root.addFocusIndex
             enabled: !root.busy
             foreground: root.foreground
             fontFamily: root.fontFamily
             onClicked: root.addFocusedApplication()
-            onHovered: function(hovered) { if (hovered) root.focusIndex = 2 }
+            onHovered: function(hovered) { if (hovered) root.focusIndex = root.addFocusIndex }
           }
         }
       }

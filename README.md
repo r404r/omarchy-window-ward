@@ -26,6 +26,7 @@ It refuses to replace an existing `~/.local/bin/window-ward` file or a modified 
 ```sh
 window-ward list
 window-ward add-focused "My application"
+window-ward set-app-enabled application-id false  # or: true
 window-ward remove application-id
 window-ward timeout 3000
 window-ward enable   # or: disable
@@ -34,6 +35,9 @@ window-ward doctor
 
 Configuration is stored at `~/.config/window-ward/config.json`. Matching uses window class and
 initialClass; Window Ward never needs browser URLs, profiles, titles, passwords or tokens.
+The panel resolves each icon automatically from the application rule ID, then its exact class and
+initialClass values, using the active system icon theme; a generic application icon is the final fallback.
+Each list row can be paused independently or removed after a second confirmation click.
 
 ## Remove
 

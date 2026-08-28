@@ -1,5 +1,8 @@
 #!/usr/bin/env bash
+# jq programs below are intentionally single quoted; jq variables are not shell expansions.
+# shellcheck disable=SC2016
 set -euo pipefail
+umask 077
 
 config_file=${WINDOW_WARD_CONFIG:-${XDG_CONFIG_HOME:-$HOME/.config}/window-ward/config.json}
 state_file=${WINDOW_WARD_STATE:-${XDG_RUNTIME_DIR:?XDG_RUNTIME_DIR is required}/window-ward.state}
@@ -15,12 +18,35 @@ default_config() {
 
 ensure_config() {
   need jq
+  need flock
+  mkdir -p "${config_file%/*}"
+  exec 8>"${config_file}.lock"
+  flock -x 8
   if [[ ! -e $config_file ]]; then
-    mkdir -p "${config_file%/*}"
-    umask 077
-    default_config >"$config_file"
+    local tmp
+    tmp=$(mktemp "${config_file}.XXXXXX")
+    default_config >"$tmp"
+    chmod 600 "$tmp"
+    mv -f "$tmp" "$config_file"
   fi
-  jq -e '.schemaVersion == 1 and (.enabled|type == "boolean") and (.confirmWindowMs|type == "number") and (.protectedApplications|type == "array")' "$config_file" >/dev/null ||
+  jq -e '
+    .schemaVersion == 1 and
+    (.enabled | type == "boolean") and
+    (.confirmWindowMs | type == "number" and . == floor and . >= 100 and . <= 999999) and
+    (.protectedApplications | type == "array") and
+    all(.protectedApplications[];
+      type == "object" and
+      (.id | type == "string" and length > 0) and
+      (.name | type == "string" and length > 0) and
+      (.enabled | type == "boolean") and
+      .mode == "double-press" and
+      (.match | type == "object") and
+      ((.match.class // []) | type == "array") and
+      ((.match.initialClass // []) | type == "array") and
+      (((.match.class // []) | length) > 0 or ((.match.initialClass // []) | length) > 0) and
+      all((.match.class // [])[]; type == "string" and test("\\S")) and
+      all((.match.initialClass // [])[]; type == "string" and test("\\S"))
+    )' "$config_file" >/dev/null ||
     die "invalid configuration: $config_file"
 }
 
@@ -42,12 +68,15 @@ is_protected() {
     has_patterns=$(jq -r '(.match.class // []) | length' <<<"$rule")
     if ((has_patterns > 0)); then
       matched=false
+      # Intentional glob matching: rules may contain patterns such as chrome-*.
+      # shellcheck disable=SC2053
       while IFS= read -r pattern; do [[ $class == ${pattern,,} ]] && matched=true; done < <(jq -r '.match.class[]' <<<"$rule")
     fi
     [[ $matched == true ]] || continue
     has_patterns=$(jq -r '(.match.initialClass // []) | length' <<<"$rule")
     if ((has_patterns > 0)); then
       matched=false
+      # shellcheck disable=SC2053
       while IFS= read -r pattern; do [[ $initial == ${pattern,,} ]] && matched=true; done < <(jq -r '.match.initialClass[]' <<<"$rule")
     fi
     [[ $matched == true ]] && return 0
@@ -57,7 +86,7 @@ is_protected() {
 
 close_window() {
   ensure_config
-  local json address class initial now previous_address= previous_time=0 timeout
+  local json address class initial now previous_address='' previous_time=0 timeout
   json=$(active_window)
   address=$(jq -r '.address // empty' <<<"$json")
   class=$(jq -r '.class // empty' <<<"$json")
@@ -68,11 +97,15 @@ close_window() {
     "$hyprctl_bin" eval "hl.dispatch(hl.dsp.window.close({ window = \"address:$address\" }))"
     return
   fi
-  need flock
   exec 9>"${state_file}.lock"
   flock -x 9
   now=$(date +%s%3N); timeout=$(jq -r '.confirmWindowMs' "$config_file")
-  [[ -r $state_file ]] && read -r previous_address previous_time <"$state_file" || true
+  if [[ -r $state_file ]]; then
+    read -r previous_address previous_time <"$state_file" || true
+    if [[ ! $previous_address =~ ^(0x)?[0-9a-fA-F]+$ || ! $previous_time =~ ^[0-9]+$ ]]; then
+      previous_address=''; previous_time=0; rm -f -- "$state_file"
+    fi
+  fi
   if [[ $address == "$previous_address" ]] && (( now - previous_time <= timeout )); then
     rm -f -- "$state_file"
     "$hyprctl_bin" eval "hl.dispatch(hl.dsp.window.close({ window = \"address:$address\" }))"
@@ -87,7 +120,9 @@ add_focused() {
   local json class initial id name
   json=$(active_window); class=$(jq -r '.class // empty' <<<"$json"); initial=$(jq -r '.initialClass // empty' <<<"$json")
   [[ -n $class ]] || die "focused window has no class"
-  id=$(tr '[:upper:] _' '[:lower:]--' <<<"$class" | tr -cd 'a-z0-9.-'); name=${1:-$class}
+  id=$(tr '[:upper:] _' '[:lower:]--' <<<"$class" | tr -cd 'a-z0-9.-')
+  [[ -n $id ]] || id="app-$(printf '%s' "$class" | sha256sum | cut -c1-12)"
+  name=${1:-$class}
   atomic_filter --arg id "$id" --arg name "$name" --arg class "$class" --arg initial "$initial" '
     .protectedApplications |= map(select(.id != $id)) + [{id:$id,name:$name,enabled:true,mode:"double-press",match:({class:[$class]} + if $initial == "" or $initial == $class then {} else {initialClass:[$initial]} end)}]'
   printf 'Added %s (%s)\n' "$name" "$class"

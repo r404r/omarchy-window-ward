@@ -24,5 +24,22 @@ export MOCK_WINDOW_JSON='{"address":"0xaab","class":"chrome-example-pwa","initia
 : >"$tmp/calls"; export MOCK_WINDOW_JSON='{"address":"0xdef","class":"Alacritty","initialClass":"Alacritty"}'
 "$root/bin/window-ward" close; grep -q 'address:0xdef' "$tmp/calls"
 "$root/bin/window-ward" add-focused Terminal; "$root/bin/window-ward" list | grep -q $'alacritty\ttrue\tTerminal'
-"$root/bin/window-ward" remove alacritty; ! "$root/bin/window-ward" list | grep -q alacritty
+"$root/bin/window-ward" remove alacritty
+if "$root/bin/window-ward" list | grep -q alacritty; then exit 1; fi
+
+for invalid in \
+  '{"schemaVersion":1,"enabled":true,"confirmWindowMs":-1,"protectedApplications":[]}' \
+  '{"schemaVersion":1,"enabled":true,"confirmWindowMs":3000,"protectedApplications":[{}]}'; do
+  printf '%s\n' "$invalid" >"$tmp/config.json"
+  if "$root/bin/window-ward" status >/dev/null 2>&1; then exit 1; fi
+done
+
+rm -f "$tmp/config.json"
+MOCK_WINDOW_JSON='{"address":"0x111","class":"Alpha App","initialClass":"Alpha App"}' "$root/bin/window-ward" add-focused Alpha &
+pid_a=$!
+MOCK_WINDOW_JSON='{"address":"0x222","class":"Beta App","initialClass":"Beta App"}' "$root/bin/window-ward" add-focused Beta &
+pid_b=$!
+wait "$pid_a" "$pid_b"
+"$root/bin/window-ward" list | grep -q $'alpha-app\ttrue\tAlpha'
+"$root/bin/window-ward" list | grep -q $'beta-app\ttrue\tBeta'
 printf 'ok\n'

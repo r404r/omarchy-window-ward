@@ -5,7 +5,7 @@ pressing the shortcut again on the same window within the configured interval cl
 
 ## Requirements
 
-- Omarchy Quattro / Hyprland 0.56 or newer
+- Verified with Omarchy 4.0.1 / Hyprland 0.56.2
 - Bash, jq, util-linux (`flock`) and hyprctl
 
 ## Install
@@ -19,6 +19,7 @@ hyprctl configerrors
 
 The second command is intentionally explicit: Omarchy plugins do not have install hooks. It adds a
 small marked block to the user-owned Hyprland bindings and backs the file up first.
+It refuses to replace an existing `~/.local/bin/window-ward` file or a modified managed block.
 
 ## Configure
 
@@ -42,7 +43,14 @@ omarchy plugin remove io.github.r404r.window-ward
 hyprctl reload
 ```
 
-The uninstall script preserves the application rules.
+Always run `uninstall` **before** `omarchy plugin remove`; otherwise the global binding points to a
+removed plugin. If the repository was removed first, remove the marked `WINDOW WARD` block from
+`~/.config/hypr/bindings.lua`, then run `hyprctl reload`. The uninstall script preserves application rules.
+Also remove a dangling installer link only after verifying that it is a symlink:
+
+```sh
+[[ -L ~/.local/bin/window-ward ]] && rm ~/.local/bin/window-ward
+```
 
 ## Development
 
@@ -51,7 +59,12 @@ tests/test-window-ward.sh
 tests/test-setup.sh
 bash -n bin/window-ward scripts/setup scripts/uninstall tests/*.sh
 omarchy plugin validate "$PWD"
-qmllint -I "$OMARCHY_PATH/shell" BarWidget.qml Panel.qml
+QMLLINT=${QMLLINT:-/usr/lib/qt6/bin/qmllint}
+"$QMLLINT" -I "$OMARCHY_PATH/shell" BarWidget.qml Panel.qml
 ```
+
+Omarchy's `qs.*` modules are resolved by Quickshell at runtime, so standalone `qmllint` may report
+unresolved-import warnings even with the correct import path. Treat those warnings as best-effort;
+release validation also requires loading the plugin on the verified Omarchy version and checking logs.
 
 See [CONTRIBUTING.md](CONTRIBUTING.md). Licensed under MIT.

@@ -7,12 +7,14 @@ import os
 import stat
 import subprocess
 import sys
+import time
 from contextlib import contextmanager
 from pathlib import Path
 
 BEGIN = "-- BEGIN WINDOW WARD (managed by setup)"
 END = "-- END WINDOW WARD"
 MAX_BINDINGS_BYTES = 2 * 1024 * 1024
+LOCK_TIMEOUT_SECONDS = 3
 
 
 class IntegrationError(RuntimeError):
@@ -54,6 +56,13 @@ def secure_directory(path: Path, create: bool = True) -> int:
     except Exception:
         os.close(descriptor)
         raise
+    metadata = os.fstat(descriptor)
+    # We may create our own missing leaf directories, but must never "repair"
+    # permissions on an existing user directory: doing so could weaken or alter
+    # unrelated launcher/config ownership.
+    if not stat.S_ISDIR(metadata.st_mode) or metadata.st_uid != os.getuid() or metadata.st_mode & 0o022:
+        os.close(descriptor)
+        fail(f"refusing unsafe directory: {path}")
     return descriptor
 
 
@@ -68,7 +77,7 @@ def require_safe_regular(fd: int, label: str) -> tuple[int, int]:
 
 def read_file(directory_fd: int, name: str, label: str) -> tuple[bytes, int] | None:
     try:
-        descriptor = os.open(name, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW, dir_fd=directory_fd)
+        descriptor = os.open(name, os.O_RDONLY | os.O_NONBLOCK | os.O_CLOEXEC | os.O_NOFOLLOW, dir_fd=directory_fd)
     except FileNotFoundError:
         return None
     except OSError as error:
@@ -118,14 +127,22 @@ def write_backup(directory_fd: int, name: str, contents: bytes, mode: int) -> No
 def integration_lock(directory_fd: int):
     """Serialize setup/uninstall without accepting a pre-created symlink lock."""
     try:
-        descriptor = os.open(".window-ward.integration.lock", os.O_CREAT | os.O_RDWR | os.O_CLOEXEC | os.O_NOFOLLOW, 0o600, dir_fd=directory_fd)
+        descriptor = os.open(".window-ward.integration.lock", os.O_CREAT | os.O_RDWR | os.O_NONBLOCK | os.O_CLOEXEC | os.O_NOFOLLOW, 0o600, dir_fd=directory_fd)
     except OSError as error:
         if error.errno == errno.ELOOP:
             fail("refusing symlinked integration lock")
         raise
     try:
         require_safe_regular(descriptor, "integration lock")
-        fcntl.flock(descriptor, fcntl.LOCK_EX)
+        deadline = time.monotonic() + LOCK_TIMEOUT_SECONDS
+        while True:
+            try:
+                fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                if time.monotonic() >= deadline:
+                    fail("timed out waiting for integration lock")
+                time.sleep(0.05)
         yield
     finally:
         os.close(descriptor)
@@ -159,14 +176,55 @@ def link_matches(directory_fd: int, expected: str) -> bool:
     return os.readlink("window-ward", dir_fd=directory_fd) == expected
 
 
+def binding_contents(directory_fd: int, name: str) -> bytes | None:
+    existing = read_file(directory_fd, name, "bindings file")
+    return existing[0] if existing is not None else None
+
+
+def managed_block_present(contents: bytes | None, block: bytes) -> bool:
+    if contents is None:
+        return False
+    begin_count, end_count = contents.count(BEGIN.encode()), contents.count(END.encode())
+    if begin_count != 1 or end_count != 1:
+        return False
+    start, finish = contents.index(BEGIN.encode()), contents.index(END.encode()) + len(END)
+    return contents[start:finish] == block
+
+
+def reconcile_setup_failure(bin_fd: int, binding_fd: int, bindings_name: str, expected: str, block: bytes, original: bytes | None, created_link: bool) -> bool:
+    """Leave a usable pair after an uncertain rename/fsync failure.
+
+    A failed directory fsync can happen after rename.  Never overwrite an
+    unknown user edit: inspect the exact managed block and only remove the link
+    that this invocation created when the original binding is still present.
+    """
+    contents = binding_contents(binding_fd, bindings_name)
+    if managed_block_present(contents, block):
+        # The binding still names our launcher, so retaining an exact launcher
+        # is safer than creating a dangling keybinding.
+        return True
+    # Only the byte-for-byte pre-transaction source establishes that no
+    # binding can still reference our launcher.  A malformed or user-edited
+    # block is source drift, not permission to remove a possibly referenced
+    # link.
+    if contents != original:
+        return True
+    if created_link and link_matches(bin_fd, expected):
+        os.unlink("window-ward", dir_fd=bin_fd)
+    return False
+
+
 def run_setup() -> None:
     root, bin_dir, bindings = paths()
     cli, expected = bin_dir / "window-ward", str(root / "bin" / "window-ward")
     block = binding_block(cli)
     bin_fd, binding_fd = secure_directory(bin_dir), secure_directory(bindings.parent)
     created_link = False
+    transaction_started = False
+    original_binding: bytes | None = None
     try:
         with integration_lock(binding_fd):
+            transaction_started = True
             existing_link = link_matches(bin_fd, expected)
             try:
                 subprocess.run([expected, "status"], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, check=True, timeout=3)
@@ -180,6 +238,7 @@ def run_setup() -> None:
                 created_link = True
             existing = read_file(binding_fd, bindings.name, "bindings file")
             contents, mode = existing if existing is not None else (b"", 0o600)
+            original_binding = existing[0] if existing is not None else None
             begin_count, end_count = contents.count(BEGIN.encode()), contents.count(END.encode())
             if begin_count != end_count or begin_count > 1:
                 fail("malformed or duplicate managed block")
@@ -191,14 +250,21 @@ def run_setup() -> None:
                 write_backup(binding_fd, bindings.name, contents, mode)
                 write_atomic(binding_fd, bindings.name, contents + (b"\n" if contents else b"") + block + b"\n", mode)
     except Exception:
-        if created_link:
-            with integration_lock(binding_fd):
-                try:
-                    metadata = os.stat("window-ward", dir_fd=bin_fd, follow_symlinks=False)
-                    if stat.S_ISLNK(metadata.st_mode) and os.readlink("window-ward", dir_fd=bin_fd) == expected:
-                        os.unlink("window-ward", dir_fd=bin_fd)
-                except FileNotFoundError:
-                    pass
+        # Reacquire before inspecting.  The reconciliation deliberately does
+        # not restore a backup or overwrite a drifted binding: a post-rename
+        # fsync error is ambiguous.
+        retained_integration = False
+        if transaction_started:
+            try:
+                with integration_lock(binding_fd):
+                    retained_integration = reconcile_setup_failure(bin_fd, binding_fd, bindings.name, expected, block, original_binding, created_link)
+            except IntegrationError:
+                # Another cooperative setup may be completing the transaction.
+                # Preserve its files rather than guessing which launcher is safe
+                # to remove; the original failure is still reported below.
+                retained_integration = True
+        if retained_integration:
+            raise IntegrationError("setup interrupted after a binding update; managed integration was retained for safety. Verify bindings.lua and rerun setup or uninstall.")
         raise
     finally:
         os.close(bin_fd); os.close(binding_fd)

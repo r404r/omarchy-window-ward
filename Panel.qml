@@ -12,32 +12,16 @@ Panel {
 
   property var anchorItem: null
   property var hostWidget: null
-  property var applications: []
-  property bool protectionEnabled: false
   property int focusIndex: 0
-  property string errorText: ""
   property string pendingRemovalId: ""
-  property string statusOutput: ""
-  property bool statusOutputOverflow: false
-  property bool statusFinishing: false
-  property int statusGeneration: 0
-
-  // The panel is a trust boundary: the CLI, its configuration, and Hyprland
-  // can all ultimately provide this data. Keep its retained state deliberately
-  // small even when a broken or replaced command writes without stopping.
-  // The CLI accepts a 64 KiB config, then normalizes optional match fields
-  // before serializing status. 128 KiB accepts every valid normalized status
-  // with margin while still bounding retained panel memory.
-  readonly property int maxStatusOutputChars: 131072
-  readonly property int maxApplications: 128
-  readonly property int maxMatchersPerApplication: 32
-  readonly property int maxApplicationIdChars: 128
-  readonly property int maxApplicationNameChars: 256
-  readonly property int maxMatcherChars: 256
-
-  readonly property string cliPath: Quickshell.env("HOME") + "/.local/bin/window-ward"
-  readonly property bool busy: statusProcess.running || statusFinishing || toggleProcess.running || addProcess.running
-    || applicationToggleProcess.running || removeProcess.running
+  // `controller` belongs to qs.Ui.Panel and owns show()/hide(). Keep this
+  // independent data controller under a distinct name.
+  readonly property var ward: wardController
+  readonly property var applications: ward.applications
+  readonly property bool protectionEnabled: ward.protectionEnabled
+  readonly property string errorText: ward.errorText
+  readonly property bool busy: ward.busy
+  readonly property bool mutationsAllowed: ward.ready && !ward.busy
   readonly property color foreground: Color.popups.text
   readonly property color mutedForeground: Qt.darker(foreground, 1.45)
   readonly property color accent: Color.accent
@@ -66,20 +50,12 @@ Panel {
   function refresh() {
     root.pendingRemovalId = ""
     removalConfirmationTimer.stop()
-    if (!statusProcess.running && !root.statusFinishing) {
-      root.statusGeneration += 1
-      root.statusOutput = ""
-      root.statusOutputOverflow = false
-      statusProcess.requestGeneration = root.statusGeneration
-      statusProcess.running = true
-    }
+    ward.refresh()
   }
 
   function setProtection(enabled) {
-    if (root.busy) return
-    root.errorText = ""
-    toggleProcess.enable = enabled
-    toggleProcess.running = true
+    if (!root.mutationsAllowed) return
+    ward.setProtection(enabled)
   }
 
   function moveFocus(delta) {
@@ -109,31 +85,25 @@ Panel {
   }
 
   function addFocusedApplication() {
-    if (root.busy) return
-    root.errorText = ""
-    addProcess.running = true
+    if (!root.mutationsAllowed) return
+    ward.addFocusedApplication()
   }
 
   function setApplicationEnabled(applicationId, enabled) {
-    if (root.busy || !applicationId) return
-    root.errorText = ""
+    if (!root.mutationsAllowed || !applicationId) return
     root.pendingRemovalId = ""
-    applicationToggleProcess.applicationId = applicationId
-    applicationToggleProcess.enable = enabled
-    applicationToggleProcess.running = true
+    ward.setApplicationEnabled(applicationId, enabled)
   }
 
   function requestApplicationRemoval(applicationId) {
-    if (root.busy || !applicationId) return
+    if (!root.mutationsAllowed || !applicationId) return
     if (root.pendingRemovalId !== applicationId) {
       root.pendingRemovalId = applicationId
       removalConfirmationTimer.restart()
       return
     }
     removalConfirmationTimer.stop()
-    root.errorText = ""
-    removeProcess.applicationId = applicationId
-    removeProcess.running = true
+    ward.removeApplication(applicationId)
   }
 
   function matchingClasses(application) {
@@ -141,76 +111,7 @@ Panel {
     return application.match.class
   }
 
-  function boundedDisplayText(value, maximumLength) {
-    var text = String(value === undefined || value === null ? "" : value)
-      .replace(/[\u0000-\u001f\u007f]/g, " ")
-    return text.length > maximumLength ? text.slice(0, maximumLength - 1) + "…" : text
-  }
-
-  function sanitizedMatcherList(values) {
-    if (!(values instanceof Array)) return []
-    var result = []
-    for (var index = 0; index < values.length && result.length < root.maxMatchersPerApplication; index++) {
-      var matcher = root.boundedDisplayText(values[index], root.maxMatcherChars)
-      if (matcher.length > 0) result.push(matcher)
-    }
-    return result
-  }
-
-  function sanitizedApplications(values) {
-    if (!(values instanceof Array)) return []
-    var result = []
-    for (var index = 0; index < values.length && result.length < root.maxApplications; index++) {
-      var application = values[index]
-      if (!application || typeof application !== "object") continue
-      var id = String(application.id === undefined || application.id === null ? "" : application.id)
-      if (!id || id.length > root.maxApplicationIdChars || /[\u0000-\u001f\u007f]/.test(id)) continue
-      var match = application.match && typeof application.match === "object" ? application.match : {}
-      result.push({
-        id: id,
-        name: root.boundedDisplayText(application.name || id, root.maxApplicationNameChars),
-        enabled: application.enabled === true,
-        match: {
-          class: root.sanitizedMatcherList(match.class),
-          initialClass: root.sanitizedMatcherList(match.initialClass)
-        }
-      })
-    }
-    return result
-  }
-
-  function appendStatusOutput(chunk) {
-    if (root.statusOutputOverflow) return
-    var value = String(chunk)
-    var remaining = root.maxStatusOutputChars - root.statusOutput.length
-    if (remaining <= 0 || value.length > remaining) {
-      root.statusOutputOverflow = true
-      return
-    }
-    root.statusOutput += value
-  }
-
-  function finishStatus(exitCode, generation) {
-    if (generation !== root.statusGeneration) return
-    root.statusFinishing = false
-    if (exitCode !== 0) {
-      root.errorText = "Window Ward is unavailable. Run setup or doctor."
-      return
-    }
-    if (root.statusOutputOverflow) {
-      root.errorText = "Window Ward status was too large to display safely."
-      return
-    }
-    try {
-      var state = JSON.parse(root.statusOutput || "{}")
-      root.protectionEnabled = state.enabled === true
-      root.applications = root.sanitizedApplications(state.protectedApplications)
-      root.focusIndex = Math.min(root.focusIndex, 2 + root.applications.length * 2)
-      root.errorText = ""
-    } catch (error) {
-      root.errorText = "Could not read Window Ward status."
-    }
-  }
+  onApplicationsChanged: root.focusIndex = Math.min(root.focusIndex, 2 + root.applications.length * 2)
 
   function applicationIcon(application) {
     var candidates = [String((application && application.id) || "")]
@@ -234,97 +135,7 @@ Panel {
     onTriggered: root.pendingRemovalId = ""
   }
 
-  Process {
-    id: statusProcess
-    property int requestGeneration: 0
-    command: [root.cliPath, "status"]
-
-    stdout: SplitParser {
-      splitMarker: ""
-      onRead: function(chunk) { root.appendStatusOutput(chunk) }
-    }
-
-    stderr: SplitParser {
-      splitMarker: ""
-      // Deliberately consume without retaining diagnostics from a child process.
-      onRead: function(chunk) {}
-    }
-
-    onExited: function(exitCode) {
-      var generation = requestGeneration
-      root.statusFinishing = true
-      Qt.callLater(function() { root.finishStatus(exitCode, generation) })
-    }
-  }
-
-  Process {
-    id: toggleProcess
-    property bool enable: true
-    command: [root.cliPath, enable ? "enable" : "disable"]
-
-    stderr: SplitParser {
-      splitMarker: ""
-      onRead: function(chunk) {}
-    }
-
-    onExited: function(exitCode) {
-      if (exitCode === 0) root.refresh()
-      else root.errorText = "Could not change protection."
-    }
-  }
-
-  Process {
-    id: addProcess
-    command: [root.cliPath, "add-focused"]
-
-    stderr: SplitParser {
-      splitMarker: ""
-      onRead: function(chunk) {}
-    }
-
-    onExited: function(exitCode) {
-      if (exitCode === 0) root.refresh()
-      else root.errorText = "Could not add the focused application."
-    }
-  }
-
-  Process {
-    id: applicationToggleProcess
-    property string applicationId: ""
-    property bool enable: true
-    command: [root.cliPath, "set-app-enabled", applicationId, enable ? "true" : "false"]
-
-    stderr: SplitParser {
-      splitMarker: ""
-      onRead: function(chunk) {}
-    }
-
-    onExited: function(exitCode) {
-      if (exitCode === 0) root.refresh()
-      else root.errorText = "Could not change this application."
-    }
-  }
-
-  Process {
-    id: removeProcess
-    property string applicationId: ""
-    command: [root.cliPath, "remove", applicationId]
-
-    stderr: SplitParser {
-      splitMarker: ""
-      onRead: function(chunk) {}
-    }
-
-    onExited: function(exitCode) {
-      if (exitCode === 0) {
-        root.pendingRemovalId = ""
-        root.refresh()
-      } else {
-        root.pendingRemovalId = ""
-        root.errorText = "Could not remove this application."
-      }
-    }
-  }
+  WardController { id: wardController }
 
   KeyboardPanel {
     id: panel
@@ -382,15 +193,16 @@ Panel {
                 width: statusLabel.implicitWidth + Style.space(14)
                 height: Style.space(22)
                 radius: Style.cornerRadius
-                color: root.protectionEnabled
+                color: ward.ready && root.protectionEnabled
                   ? Util.alpha(root.accent, 0.18)
                   : Util.alpha(root.foreground, 0.08)
 
                 Text {
                   id: statusLabel
                   anchors.centerIn: parent
-                  text: root.protectionEnabled ? "Enabled" : "Paused"
-                  color: root.protectionEnabled ? root.accent : root.mutedForeground
+                  text: !ward.ready ? (ward.state === "loading" ? "Checking" : "Unknown")
+                    : root.protectionEnabled ? "Enabled" : "Paused"
+                  color: ward.ready && root.protectionEnabled ? root.accent : root.mutedForeground
                   font.family: root.fontFamily
                   font.pixelSize: Style.font.caption
                   font.bold: true
@@ -399,7 +211,8 @@ Panel {
             }
 
             Text {
-              text: root.protectionEnabled
+              text: !ward.ready ? "Settings are unverified; refresh to check"
+                : root.protectionEnabled
                 ? "Double-press close protection"
                 : "Close protection is paused"
               width: parent.width
@@ -438,7 +251,7 @@ Panel {
 
           Text {
             id: sectionTitle
-            text: "Protected applications"
+            text: ward.ready ? "Protected applications" : "Last known rules (read-only)"
             color: root.foreground
             font.family: root.fontFamily
             font.pixelSize: Style.font.subtitle
@@ -533,7 +346,7 @@ Panel {
                 id: enabledSwitch
                 checked: modelData.enabled === true
                 interactive: true
-                busy: root.busy
+                busy: !root.mutationsAllowed
                 hasCursor: root.focusIndex === 1 + index * 2
                 foreground: root.foreground
                 accent: root.accent
@@ -552,7 +365,7 @@ Panel {
                 bordered: root.pendingRemovalId === String(modelData.id)
                 focusable: true
                 hasCursor: root.focusIndex === 2 + index * 2
-                enabled: !root.busy
+                enabled: root.mutationsAllowed
                 foreground: Color.urgent
                 fontFamily: root.fontFamily
                 anchors.verticalCenter: parent.verticalCenter
@@ -614,7 +427,7 @@ Panel {
               : "Paused for all listed applications"
             checked: root.protectionEnabled
             hasCursor: root.focusIndex === root.globalToggleFocusIndex
-            enabled: !root.busy
+            enabled: root.mutationsAllowed
             foreground: root.foreground
             accent: root.accent
             fontFamily: root.fontFamily
@@ -631,7 +444,7 @@ Panel {
             bordered: false
             focusable: true
             hasCursor: root.focusIndex === root.addFocusIndex
-            enabled: !root.busy
+            enabled: root.mutationsAllowed
             foreground: root.foreground
             fontFamily: root.fontFamily
             onClicked: root.addFocusedApplication()

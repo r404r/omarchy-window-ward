@@ -10,7 +10,8 @@ Window Ward は、選択したアプリケーションを誤って `Super+W` で
 
 ## 要件
 
-- Omarchy 4.0.1 / Hyprland 0.56.2 で検証済み
+- 互換性の対象：Omarchy 4.0.1 / Hyprland 0.56.2。0.4.0 候補はリリース前に、
+  公式インストール経路と実環境での独立した検証が必要です。
 - Python 3.10 以降および hyprctl
 
 ## インストール
@@ -42,6 +43,28 @@ window-ward doctor
 パネルは各アイコンを、アプリケーションルール ID、完全一致する class、initialClass の順に、アクティブなシステムアイコンテーマから自動的に解決します。最後のフォールバックは汎用アプリケーションアイコンです。
 リストの各行は個別に一時停止でき、2 回目の確認クリック後に削除できます。
 
+既存ルールで保護されているアプリを追加しても、元のルールと有効状態を保持します。
+グループ化されたルールを狭い一致条件へ黙って置き換えません。状態の読み込みが失敗した
+場合は編集できません。更新に成功してからルールを変更してください。
+
+### 確認時間と通知の消去
+
+`window-ward timeout 3000` は `confirmWindowMs` を 3000 ミリ秒に設定します。同じ
+ウィンドウで再度 `Super+W` を押して閉じることを確認できる時間です。時間が過ぎただけで
+アプリが閉じることはありません。CLI は通知にも同じ時間を要求しますが、実際の表示時間は
+通知サーバーが決めます。
+
+2026-09-05 に調べた Omarchy の実装では、通常通知は最低 8 秒、最大 30 秒表示され、
+マウスを重ねるとカウントダウンが停止します。したがって 3 秒の確認時間より通知が長く
+残ることがあります。表示中でも確認が有効とは限りません。これはホスト側の方針であり、
+Window Ward の `timeout` を短くしても最低表示時間は変更できません。
+
+通知を右クリックすると直ちに消せます。左クリックでもホストの既定アクション／フォーカス
+処理後に消えますが、Window Ward はアプリを閉じるアクションを登録していません。
+通知を消しても独立した確認状態は解除されません。プラグインはホストの通知カードを
+再利用しており、独自の閉じるボタンを備えたポップアップではありません。
+この操作は Omarchy の更新で変わる可能性があります。
+
 ## 削除
 
 ```sh
@@ -61,15 +84,27 @@ hyprctl reload
 
 ```sh
 tests/test-window-ward.sh
+python3 -B tests/test_backend.py
 tests/test-setup.sh
+python3 -B tests/test_integration.py
+node tests/test-ward-model.mjs
+tests/test-panel-theme.sh
+tests/test-controller-smoke.sh # Quickshell 必須・隔離されたヘッドレステスト
 python -B bin/window-ward --help >/dev/null
 cache_dir=$(mktemp -d); trap 'rm -rf "$cache_dir"' EXIT; PYTHONPYCACHEPREFIX="$cache_dir" python -m py_compile scripts/window_ward_integration.py scripts/setup scripts/uninstall
 bash -n tests/*.sh
 omarchy plugin validate "$PWD"
 QMLLINT=${QMLLINT:-/usr/lib/qt6/bin/qmllint}
-"$QMLLINT" -I "$OMARCHY_PATH/shell" BarWidget.qml Panel.qml
+"$QMLLINT" -I "$OMARCHY_PATH/shell" BarWidget.qml Panel.qml WardController.qml
 ```
 
 Omarchy の `qs.*` モジュールは Quickshell が実行時に解決するため、正しいインポートパスを指定していても、単体の `qmllint` では未解決インポートに関する警告が出る場合があります。これらの警告はベストエフォートとして扱ってください。リリース前の検証では、検証済みの Omarchy バージョンでプラグインを読み込み、ログを確認することも必要です。
 
 [CONTRIBUTING.md](CONTRIBUTING.md) を参照してください。MIT ライセンスです。
+
+Node.js は開発テストのみの依存関係です。モデル／静的テストは実際のパネルの
+ライフサイクルや通知動作を保証しません。最終候補ごとに公式インストールと実環境での
+検証が必要です。ヘッドレス controller smoke は Quickshell がある環境での必須の
+ローカル公開前チェックです（Ubuntu CI には Quickshell がありません）。候補 SHA と
+出力を保存し、Node／静的テストで代用しないでください。生成キャッシュはプラグインの
+ディレクトリ外に置いてください。

@@ -2,6 +2,7 @@
 """Window Ward's bounded, symlink-safe command interface."""
 from __future__ import annotations
 
+import copy
 import errno
 import fcntl
 import fnmatch
@@ -29,6 +30,7 @@ MAX_NAME_CHARS = 256
 MAX_PATTERNS_PER_FIELD = 32
 MAX_PATTERN_CHARS = 256
 COMMAND_TIMEOUT_SECONDS = 3
+LOCK_TIMEOUT_SECONDS = 3
 ADDRESS_RE = re.compile(r"^(?:0x)?[0-9a-fA-F]+$")
 
 
@@ -115,6 +117,18 @@ def validate_regular_file(fd: int, label: str, max_bytes: int) -> os.stat_result
     return metadata
 
 
+def acquire_lock(fd: int, label: str) -> None:
+    deadline = time.monotonic() + LOCK_TIMEOUT_SECONDS
+    while True:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return
+        except BlockingIOError:
+            if time.monotonic() >= deadline:
+                die(f"{label} lock timed out")
+            time.sleep(0.02)
+
+
 class SecureStore:
     def __init__(self, path: Path, label: str, max_bytes: int) -> None:
         if path.name in ("", ".", ".."):
@@ -136,14 +150,14 @@ class SecureStore:
             die(f"cannot open {self.label} lock: {error.strerror}")
         try:
             validate_regular_file(lock_fd, f"{self.label} lock", 0)
-            fcntl.flock(lock_fd, fcntl.LOCK_EX)
+            acquire_lock(lock_fd, f"{self.label} lock")
             yield
         finally:
             os.close(lock_fd)
 
     def read(self, missing_ok: bool = False) -> bytes | None:
         try:
-            fd = os.open(self.name, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW, dir_fd=self.directory_fd)
+            fd = os.open(self.name, os.O_RDONLY | os.O_NONBLOCK | os.O_CLOEXEC | os.O_NOFOLLOW, dir_fd=self.directory_fd)
         except FileNotFoundError:
             if missing_ok:
                 return None
@@ -198,7 +212,7 @@ class SecureStore:
 
     def remove(self) -> None:
         try:
-            fd = os.open(self.name, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW, dir_fd=self.directory_fd)
+            fd = os.open(self.name, os.O_RDONLY | os.O_NONBLOCK | os.O_CLOEXEC | os.O_NOFOLLOW, dir_fd=self.directory_fd)
         except FileNotFoundError:
             return
         except OSError as error:
@@ -213,7 +227,7 @@ class SecureStore:
         os.fsync(self.directory_fd)
 
 
-DEFAULT_CONFIG: dict[str, Any] = {"schemaVersion": 1, "enabled": True, "confirmWindowMs": 3000, "protectedApplications": [{"id": "google-chrome", "name": "Google Chrome", "enabled": True, "mode": "double-press", "match": {"class": ["google-chrome", "chromium", "chrome-*"]}}]}
+DEFAULT_CONFIG: dict[str, Any] = {"schemaVersion": 1, "enabled": True, "confirmWindowMs": 3000, "protectedApplications": [{"id": "google-chrome", "name": "Google Chrome", "enabled": True, "mode": "double-press", "match": {"class": ["google-chrome", "chromium", "chrome-*"], "initialClass": []}}]}
 
 
 def validate_text(value: Any, field: str, maximum: int) -> str:
@@ -272,8 +286,9 @@ def status_bytes(configuration: dict[str, Any]) -> bytes:
 def load_config(store: SecureStore) -> dict[str, Any]:
     contents = store.read(missing_ok=True)
     if contents is None:
-        store.write(json_bytes(DEFAULT_CONFIG))
-        return DEFAULT_CONFIG
+        configuration = validate_config(copy.deepcopy(DEFAULT_CONFIG))
+        store.write(json_bytes(configuration))
+        return configuration
     try:
         return validate_config(json.loads(contents.decode("utf-8")))
     except (UnicodeDecodeError, json.JSONDecodeError):
@@ -334,6 +349,14 @@ def bounded_command(arguments: list[str], limit: int) -> bytes:
     return bytes(output)
 
 
+def terminate_owned_process_group(process: subprocess.Popen[Any]) -> None:
+    try:
+        os.killpg(process.pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+    process.wait()
+
+
 def quiet_command(arguments: list[str]) -> None:
     try:
         process = subprocess.Popen(arguments, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
@@ -341,19 +364,15 @@ def quiet_command(arguments: list[str]) -> None:
         die(f"cannot run {arguments[0]}: {error.strerror}")
     try:
         return_code = process.wait(timeout=COMMAND_TIMEOUT_SECONDS)
-        if return_code != 0:
-            try:
-                os.killpg(process.pid, signal.SIGKILL)
-            except ProcessLookupError:
-                pass
-            die(f"{arguments[0]} failed with exit status {return_code}")
+    except WardError:
+        terminate_owned_process_group(process)
+        raise
     except subprocess.TimeoutExpired:
-        try:
-            os.killpg(process.pid, signal.SIGKILL)
-        except ProcessLookupError:
-            pass
-        process.wait()
+        terminate_owned_process_group(process)
         die(f"{arguments[0]} timed out")
+    if return_code != 0:
+        terminate_owned_process_group(process)
+        die(f"{arguments[0]} failed with exit status {return_code}")
 
 
 def active_window() -> dict[str, str]:
@@ -376,37 +395,83 @@ def matches(patterns: list[str], value: str) -> bool:
 
 
 def is_protected(config: dict[str, Any], window: dict[str, str]) -> bool:
-    return any(application["enabled"] and matches(application["match"]["class"], window["class"]) and matches(application["match"]["initialClass"], window["initialClass"]) for application in config["protectedApplications"])
+    return any(application["enabled"] and application_matches(application, window) for application in config["protectedApplications"])
+
+
+def application_matches(application: dict[str, Any], window: dict[str, str]) -> bool:
+    return matches(application["match"]["class"], window["class"]) and matches(application["match"]["initialClass"], window["initialClass"])
+
+
+def configuration_snapshot() -> dict[str, Any]:
+    with configuration() as (_store, config):
+        return config
+
+
+def window_identity(window: dict[str, str]) -> str:
+    return hashlib.sha256("\0".join((window["address"], window["class"], window["initialClass"])).encode("utf-8")).hexdigest()
+
+
+def session_identity(state: SecureStore) -> str:
+    metadata = os.fstat(state.directory_fd)
+    signature = os.environ.get("HYPRLAND_INSTANCE_SIGNATURE", "")
+    if len(signature) > 256 or has_control_characters(signature):
+        signature = ""
+    return hashlib.sha256(f"{metadata.st_dev}:{metadata.st_ino}:{os.environ.get('XDG_SESSION_ID', '')}:{signature}".encode("utf-8")).hexdigest()
+
+
+def read_confirmation(contents: bytes | None) -> tuple[str, str, int] | None:
+    if not contents:
+        return None
+    try:
+        parts = contents.decode("ascii").strip().split()
+    except UnicodeDecodeError:
+        return None
+    if len(parts) != 4 or parts[0] != "v1" or not re.fullmatch(r"[0-9a-f]{64}", parts[1]) or not re.fullmatch(r"[0-9a-f]{64}", parts[2]) or not parts[3].isdigit():
+        return None
+    return parts[1], parts[2], int(parts[3])
+
+
+def dispatch_close(address: str) -> None:
+    quiet_command([command_name("WINDOW_WARD_HYPRCTL", "hyprctl"), "eval", f'hl.dispatch(hl.dsp.window.close({{ window = "address:{address}" }}))'])
+
+
+def unchanged_window(expected: dict[str, str]) -> bool:
+    return window_identity(active_window()) == window_identity(expected)
 
 
 def close_window() -> None:
-    with configuration() as (_store, config):
-        window = active_window()
-    hyprctl = command_name("WINDOW_WARD_HYPRCTL", "hyprctl")
+    config = configuration_snapshot()
+    window = active_window()
     state = SecureStore(state_path(), "confirmation state", MAX_STATE_BYTES)
     try:
         if not config["enabled"] or not is_protected(config, window):
             with state.locked():
                 state.remove()
-            quiet_command([hyprctl, "eval", f'hl.dispatch(hl.dsp.window.close({{ window = "address:{window["address"]}" }}))'])
+            final_config = configuration_snapshot()
+            if unchanged_window(window) and (not final_config["enabled"] or not is_protected(final_config, window)):
+                dispatch_close(window["address"])
             return
+        confirmed = False
         with state.locked():
-            now, previous_address, previous_time = time.time_ns() // 1_000_000, "", 0
-            contents = state.read(missing_ok=True)
-            if contents:
-                try:
-                    parts = contents.decode("ascii").strip().split()
-                    if len(parts) == 2 and ADDRESS_RE.fullmatch(parts[0]) and parts[1].isdigit():
-                        previous_address, previous_time = parts[0], int(parts[1])
-                except UnicodeDecodeError:
-                    pass
-            if window["address"] == previous_address and now - previous_time <= config["confirmWindowMs"]:
+            now = time.monotonic_ns() // 1_000_000
+            previous = read_confirmation(state.read(missing_ok=True))
+            if previous is None:
+                previous_session, previous_window, elapsed = "", "", -1
+            else:
+                previous_session, previous_window, previous_time = previous
+                elapsed = now - previous_time
+            if previous_session == session_identity(state) and previous_window == window_identity(window) and 0 <= elapsed <= config["confirmWindowMs"]:
                 state.remove()
-                quiet_command([hyprctl, "eval", f'hl.dispatch(hl.dsp.window.close({{ window = "address:{window["address"]}" }}))'])
-                return
-            state.write(f'{window["address"]} {now}\n'.encode("ascii"))
+                confirmed = True
+            else:
+                state.write(f'v1 {session_identity(state)} {window_identity(window)} {now}\n'.encode("ascii"))
+        if confirmed:
+            final_config = configuration_snapshot()
+            if unchanged_window(window) and final_config["enabled"] and is_protected(final_config, window):
+                dispatch_close(window["address"])
+            return
         try:
-            quiet_command([command_name("WINDOW_WARD_NOTIFY", "omarchy"), "notification", "send", "-u", "normal", "-t", str(config["confirmWindowMs"]), "Window Ward", f'Press Super+W again to close {window["class"]}'])
+            quiet_command([command_name("WINDOW_WARD_NOTIFY", "omarchy"), "notification", "send", "-u", "normal", "-t", str(config["confirmWindowMs"]), "Window Ward", f'Press Super+W again within {config["confirmWindowMs"]} ms to close {window["class"]}. Right-click to dismiss.'])
         except WardError:
             pass
     finally:
@@ -425,12 +490,15 @@ def add_focused(name: str | None) -> None:
         die("focused window has no class")
     display_name, identifier = validate_text(name if name is not None else window["class"], "application name", MAX_NAME_CHARS), slug_for_class(window["class"])
     with configuration() as (store, config):
-        applications = [application for application in config["protectedApplications"] if application["id"] != identifier]
+        if any(application_matches(application, window) for application in config["protectedApplications"]):
+            print(f"Already protected by an existing rule ({window['class']})")
+            return
+        if any(application["id"] == identifier for application in config["protectedApplications"]):
+            die("application id conflicts with an existing rule")
         match: dict[str, list[str]] = {"class": [window["class"]], "initialClass": []}
         if window["initialClass"] and window["initialClass"] != window["class"]:
             match["initialClass"] = [window["initialClass"]]
-        applications.append({"id": identifier, "name": display_name, "enabled": True, "mode": "double-press", "match": match})
-        config["protectedApplications"] = applications
+        config["protectedApplications"].append({"id": identifier, "name": display_name, "enabled": True, "mode": "double-press", "match": match})
         store.write(json_bytes(validate_config(config)))
     print(f"Added {display_name} ({window['class']})")
 
@@ -485,7 +553,12 @@ def main(arguments: list[str]) -> None:
     else: die("unknown command: " + command)
 
 
+def interrupted(_signum: int, _frame: Any) -> None:
+    raise WardError("interrupted")
+
+
 if __name__ == "__main__":
+    signal.signal(signal.SIGTERM, interrupted)
     try: main(sys.argv[1:])
     except WardError as error:
         print(f"window-ward: {error}", file=sys.stderr); sys.exit(1)

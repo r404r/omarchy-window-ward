@@ -3,13 +3,18 @@ on: [push, pull_request]
 jobs:
   test:
     runs-on: ubuntu-latest
+    env:
+      PYTHONDONTWRITEBYTECODE: "1"
     steps:
       - uses: actions/checkout@v4
-      - run: sudo apt-get update && sudo apt-get install -y jq shellcheck
+      - run: sudo apt-get update && sudo apt-get install -y jq shellcheck nodejs
       - run: cache_dir=$(mktemp -d); trap 'rm -rf "$cache_dir"' EXIT; PYTHONPYCACHEPREFIX="$cache_dir" python3 -m py_compile bin/window-ward scripts/window_ward_integration.py scripts/setup scripts/uninstall
       - run: bash -n tests/*.sh
       - run: shellcheck tests/*.sh
       - run: jq -e . manifest.json
       - run: tests/test-window-ward.sh
+      - run: python3 -B tests/test_backend.py
       - run: tests/test-setup.sh
+      - run: python3 -B tests/test_integration.py
+      - run: node tests/test-ward-model.mjs
       - run: tests/test-panel-theme.sh

@@ -70,6 +70,15 @@ if "$root/bin/window-ward" status >/dev/null 2>&1; then exit 1; fi
 grep -qx 'do not change' "$victim"
 rm "$tmp/config.json.lock"
 
+# Special files are rejected without blocking before type validation, and locks time out.
+rm -f "$tmp/config.json"; mkfifo "$tmp/config.json"
+if timeout 1 "$root/bin/window-ward" status >/dev/null 2>&1; then exit 1; fi
+rm "$tmp/config.json"; "$root/bin/window-ward" status >/dev/null
+flock "$tmp/config.json.lock" -c 'sleep 4' & lock_holder=$!
+sleep 0.1
+if timeout 4 "$root/bin/window-ward" status >/dev/null 2>&1; then exit 1; fi
+wait "$lock_holder"
+
 mkdir "$tmp/real-parent"; ln -s "$tmp/real-parent" "$tmp/linked-parent"
 WINDOW_WARD_CONFIG="$tmp/linked-parent/config.json" "$root/bin/window-ward" status >/dev/null 2>&1 && exit 1
 rm "$tmp/linked-parent"; rmdir "$tmp/real-parent"
@@ -128,6 +137,40 @@ rm -f "$tmp/state"
 notify_child=$(cat "$tmp/notify-child")
 for _ in {1..20}; do kill -0 "$notify_child" 2>/dev/null || break; sleep 0.05; done
 if kill -0 "$notify_child" 2>/dev/null; then exit 1; fi
+
+# Defaults are normalized on the first direct close; duplicate/grouped rules are never narrowed or re-enabled.
+rm -f "$tmp/config.json" "$tmp/state"
+export MOCK_WINDOW_JSON='{"address":"0xf01","class":"google-chrome","initialClass":"google-chrome"}'
+"$root/bin/window-ward" close
+grep -q '"initialClass":\[\]' "$tmp/config.json"
+printf '%s\n' '{"schemaVersion":1,"enabled":true,"confirmWindowMs":3000,"protectedApplications":[{"id":"foo-bar","name":"Existing","enabled":false,"mode":"double-press","match":{"class":["Foo Bar"],"initialClass":[]}}]}' >"$tmp/config.json"
+export MOCK_WINDOW_JSON='{"address":"0xf02","class":"Foo Bar","initialClass":"Foo Bar"}'
+"$root/bin/window-ward" add-focused Existing >/dev/null
+grep -q '"enabled":false' "$tmp/config.json"
+export MOCK_WINDOW_JSON='{"address":"0xf03","class":"Foo_Bar","initialClass":"Foo_Bar"}'
+if "$root/bin/window-ward" add-focused Collision >/dev/null 2>&1; then exit 1; fi
+grep -q '"Foo Bar"' "$tmp/config.json"
+
+# SIGTERM to our CLI also terminates only its owned active-window process group.
+cat >"$tmp/bin/hyprctl" <<'EOF'
+#!/usr/bin/env bash
+if [[ $1 == activewindow ]]; then
+  sleep 30 & echo $! >"${MOCK_CANCEL_CHILD}"
+  wait
+else
+  printf '%s\n' "$*" >>"${MOCK_CALLS}"
+fi
+EOF
+chmod +x "$tmp/bin/hyprctl"
+export MOCK_CANCEL_CHILD="$tmp/cancel-child" MOCK_WINDOW_JSON='{"address":"0xf04","class":"cancel-test","initialClass":"cancel-test"}'
+"$root/bin/window-ward" add-focused Cancel >/dev/null 2>&1 & cli_pid=$!
+for _ in {1..40}; do [[ -s $tmp/cancel-child ]] && break; sleep 0.05; done
+[[ -s $tmp/cancel-child ]]
+cancel_child=$(cat "$tmp/cancel-child")
+kill -TERM "$cli_pid"
+wait "$cli_pid" || true
+for _ in {1..40}; do kill -0 "$cancel_child" 2>/dev/null || break; sleep 0.05; done
+if kill -0 "$cancel_child" 2>/dev/null; then exit 1; fi
 
 # The public CLI does not honour test-only executable and path overrides.
 WINDOW_WARD_TESTING=0 WINDOW_WARD_CONFIG="$victim" "$root/bin/window-ward" help >/dev/null

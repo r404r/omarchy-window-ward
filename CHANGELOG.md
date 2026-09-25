@@ -1,6 +1,12 @@
 # Changelog
 
-## 0.4.1 - Unreleased
+## 0.4.2 - Unreleased
+
+- Make the first-press warning name both protected close chords, matching the
+  existing behavior where either `Super+W` or `Super+Q` confirms the close.
+- Assert the exact confirmation notification text in the backend regression test.
+
+## 0.4.1 - 2026-09-25
 
 - Protect both current Omarchy close chords, `Super+W` and `Super+Q`, while
   retaining the binding syntax supported by Omarchy 4.0.4.

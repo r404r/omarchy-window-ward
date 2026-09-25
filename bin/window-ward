@@ -471,7 +471,7 @@ def close_window() -> None:
                 dispatch_close(window["address"])
             return
         try:
-            quiet_command([command_name("WINDOW_WARD_NOTIFY", "omarchy"), "notification", "send", "-u", "normal", "-t", str(config["confirmWindowMs"]), "Window Ward", f'Press Super+W again within {config["confirmWindowMs"]} ms to close {window["class"]}. Right-click to dismiss.'])
+            quiet_command([command_name("WINDOW_WARD_NOTIFY", "omarchy"), "notification", "send", "-u", "normal", "-t", str(config["confirmWindowMs"]), "Window Ward", f'Press Super+W or Super+Q again within {config["confirmWindowMs"]} ms to close {window["class"]}. Right-click to dismiss.'])
         except WardError:
             pass
     finally:

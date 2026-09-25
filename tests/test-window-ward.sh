@@ -17,6 +17,7 @@ export MOCK_WINDOW_JSON='{"address":"0xabc","class":"google-chrome","initialClas
 "$root/bin/window-ward" status >/dev/null
 [[ $("$root/bin/window-ward" status | wc -c) -le 65536 ]]
 "$root/bin/window-ward" close; [[ ! -e $tmp/calls ]]
+grep -Fxq 'notification send -u normal -t 3000 Window Ward Press Super+W or Super+Q again within 3000 ms to close google-chrome. Right-click to dismiss.' "$tmp/notifications"
 "$root/bin/window-ward" close; grep -q 'address:0xabc' "$tmp/calls"
 : >"$tmp/calls"; export MOCK_WINDOW_JSON='{"address":"0xaaa","class":"chrome-example-pwa","initialClass":"chrome-example-pwa"}'
 "$root/bin/window-ward" close; [[ ! -s $tmp/calls ]]

@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "io.github.r404r.window-ward",
   "name": "Window Ward",
-  "version": "0.4.1",
+  "version": "0.4.2",
   "author": "r404r",
   "license": "MIT",
   "description": "Protect selected applications from accidental window closes.",

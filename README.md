@@ -12,7 +12,7 @@ configured interval closes it normally.
 
 ## Requirements
 
-- Compatibility target: Omarchy 4.0.4 / Hyprland 0.56.2; the 0.4.1 candidate
+- Compatibility target: Omarchy 4.0.4 / Hyprland 0.56.2; the 0.4.2 candidate
   still requires its own official-install/runtime acceptance before release.
 - Python 3.10 or newer and hyprctl
 
@@ -36,7 +36,7 @@ After updating from 0.4.0, run the setup command again and then `hyprctl reload`
 only the exact previous W-only block, backs it up, and atomically migrates it to protect both W and Q;
 an edited or unknown block is still rejected.
 
-Before downgrading from 0.4.1, run the 0.4.1 `scripts/uninstall`; the 0.4.0 uninstaller does not
+Before downgrading from 0.4.1 or later, run the current `scripts/uninstall`; the 0.4.0 uninstaller does not
 recognize the newer two-shortcut managed block. Reinstall the older version and rerun its setup afterward.
 
 ## Configure

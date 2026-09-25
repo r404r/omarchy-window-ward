@@ -2,8 +2,9 @@
 
 English | [简体中文](README.zh-CN.md) | [日本語](README.ja.md)
 
-Window Ward protects selected applications from an accidental `Super+W`. The first press warns;
-pressing the shortcut again on the same window within the configured interval closes it normally.
+Window Ward protects selected applications from an accidental `Super+W` or `Super+Q`. The first
+protected close command warns; pressing either shortcut again on the same window within the
+configured interval closes it normally.
 
 [View Window Ward on the Omarchy Plugin Marketplace](https://omarchyplugins.com/plugin.html?id=io.github.r404r.window-ward).
 
@@ -11,7 +12,7 @@ pressing the shortcut again on the same window within the configured interval cl
 
 ## Requirements
 
-- Compatibility target: Omarchy 4.0.1 / Hyprland 0.56.2; the 0.4.0 candidate
+- Compatibility target: Omarchy 4.0.4 / Hyprland 0.56.2; the 0.4.1 candidate
   still requires its own official-install/runtime acceptance before release.
 - Python 3.10 or newer and hyprctl
 
@@ -27,6 +28,16 @@ hyprctl configerrors
 The second command is intentionally explicit: Omarchy plugins do not have install hooks. It adds a
 small marked block to the user-owned Hyprland bindings and backs the file up first.
 It refuses to replace an existing `~/.local/bin/window-ward` file or a modified managed block.
+The managed block deliberately claims both `Super+W` and `Super+Q`. On an older Omarchy release
+where `Super+Q` was not yet a default close shortcut, setup therefore adds it as a protected close
+shortcut; resolve any existing personal `Super+Q` binding before running setup.
+
+After updating from 0.4.0, run the setup command again and then `hyprctl reload`. Setup recognizes
+only the exact previous W-only block, backs it up, and atomically migrates it to protect both W and Q;
+an edited or unknown block is still rejected.
+
+Before downgrading from 0.4.1, run the 0.4.1 `scripts/uninstall`; the 0.4.0 uninstaller does not
+recognize the newer two-shortcut managed block. Reinstall the older version and rerun its setup afterward.
 
 ## Configure
 
@@ -54,7 +65,7 @@ status is not an editable snapshot: refresh successfully before changing rules.
 ### Confirmation time and notification dismissal
 
 `window-ward timeout 3000` sets `confirmWindowMs` to 3000 milliseconds: the interval
-in which a second `Super+W` on the same window confirms closing it. No application
+in which a second protected close shortcut on the same window confirms closing it. No application
 is closed merely because that interval expires. The CLI also requests that duration
 for its notification, but the notification server controls the visible lifetime.
 

@@ -160,6 +160,24 @@ def paths() -> tuple[Path, Path, Path]:
 
 
 def binding_block(cli: Path) -> bytes:
+    # Omarchy 4.0.4 stable does not define o.rebind(). Keep its equivalent
+    # explicit unbind/bind sequence so one generated block works on both the
+    # supported stable release and current quattro.
+    location = str(cli)
+    if any(character in location for character in ('"', "\\", "\n")) or any(character.isspace() for character in location):
+        fail("install path cannot contain quotes, backslashes, or whitespace")
+    return (
+        f'{BEGIN}\n'
+        'hl.unbind("SUPER + W")\n'
+        f'o.bind("SUPER + W", "Close window safely", "{location} close")\n'
+        'hl.unbind("SUPER + Q")\n'
+        f'o.bind("SUPER + Q", "Close window safely", "{location} close")\n'
+        f'{END}'
+    ).encode()
+
+
+def legacy_binding_block(cli: Path) -> bytes:
+    """Return the exact W-only block generated through Window Ward 0.4.0."""
     location = str(cli)
     if any(character in location for character in ('"', "\\", "\n")) or any(character.isspace() for character in location):
         fail("install path cannot contain quotes, backslashes, or whitespace")
@@ -218,6 +236,7 @@ def run_setup() -> None:
     root, bin_dir, bindings = paths()
     cli, expected = bin_dir / "window-ward", str(root / "bin" / "window-ward")
     block = binding_block(cli)
+    legacy_block = legacy_binding_block(cli)
     bin_fd, binding_fd = secure_directory(bin_dir), secure_directory(bindings.parent)
     created_link = False
     transaction_started = False
@@ -244,7 +263,11 @@ def run_setup() -> None:
                 fail("malformed or duplicate managed block")
             if begin_count == 1:
                 start, finish = contents.index(BEGIN.encode()), contents.index(END.encode()) + len(END)
-                if contents[start:finish] != block:
+                existing_block = contents[start:finish]
+                if existing_block == legacy_block:
+                    write_backup(binding_fd, bindings.name, contents, mode)
+                    write_atomic(binding_fd, bindings.name, contents[:start] + block + contents[finish:], mode)
+                elif existing_block != block:
                     fail("managed block was modified; refusing to overwrite it")
             else:
                 write_backup(binding_fd, bindings.name, contents, mode)
@@ -275,6 +298,7 @@ def run_uninstall() -> None:
     root, bin_dir, bindings = paths()
     cli, expected = bin_dir / "window-ward", str(root / "bin" / "window-ward")
     block = binding_block(cli)
+    legacy_block = legacy_binding_block(cli)
     bin_fd, binding_fd = secure_directory(bin_dir), secure_directory(bindings.parent)
     try:
         with integration_lock(binding_fd):
@@ -286,7 +310,7 @@ def run_uninstall() -> None:
                     fail("malformed or duplicate managed block; refusing to remove it")
                 if begin_count == 1:
                     start, finish = contents.index(BEGIN.encode()), contents.index(END.encode()) + len(END)
-                    if contents[start:finish] != block:
+                    if contents[start:finish] not in (block, legacy_block):
                         fail("managed block was modified; refusing to remove it")
                     write_backup(binding_fd, bindings.name, contents, mode)
                     write_atomic(binding_fd, bindings.name, contents[:start] + contents[finish:], mode)

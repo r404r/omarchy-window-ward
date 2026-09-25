@@ -45,10 +45,82 @@ with tempfile.TemporaryDirectory(prefix="window-ward-integration-") as temporary
     checked([sys.executable, "-B", str(ROOT / "scripts" / "setup")], env)
     checked([sys.executable, "-B", str(ROOT / "scripts" / "setup")], env)
     assert (tmp / "bin" / "window-ward").is_symlink()
-    assert (tmp / "bindings.lua").read_text(encoding="utf-8").count(integration.BEGIN) == 1
+    installed_block = (tmp / "bindings.lua").read_text(encoding="utf-8")
+    assert installed_block.count(integration.BEGIN) == 1
+    assert installed_block.count('hl.unbind("SUPER + W")') == 1
+    assert installed_block.count('hl.unbind("SUPER + Q")') == 1
+    assert installed_block.count('o.bind("SUPER + W", "Close window safely"') == 1
+    assert installed_block.count('o.bind("SUPER + Q", "Close window safely"') == 1
+    assert "o.rebind" not in installed_block
     checked([sys.executable, "-B", str(ROOT / "scripts" / "uninstall")], env)
     assert not (tmp / "bin" / "window-ward").exists()
     assert (tmp / "config.json").is_file()
+
+    # The exact W-only block emitted through 0.4.0 is backed up and migrated.
+    migration = tmp / "migration"
+    (migration / "bin").mkdir(parents=True)
+    (migration / "runtime").mkdir()
+    migration_env = environment(migration)
+    migration_launcher = migration / "bin" / "window-ward"
+    migration_bindings = migration / "bindings.lua"
+    migration_bindings.write_bytes(b"-- user binding\n" + integration.legacy_binding_block(migration_launcher) + b"\n")
+    checked([sys.executable, "-B", str(ROOT / "scripts" / "setup")], migration_env)
+    assert integration.binding_block(migration_launcher) in migration_bindings.read_bytes()
+    assert integration.legacy_binding_block(migration_launcher) not in migration_bindings.read_bytes()
+    assert len(list(migration.glob("bindings.lua.window-ward-backup.*"))) == 1
+    checked([sys.executable, "-B", str(ROOT / "scripts" / "setup")], migration_env)
+    assert len(list(migration.glob("bindings.lua.window-ward-backup.*"))) == 1
+    checked([sys.executable, "-B", str(ROOT / "scripts" / "uninstall")], migration_env)
+    assert not migration_launcher.exists()
+    assert integration.BEGIN.encode() not in migration_bindings.read_bytes()
+
+    # A current uninstall can also clean up an exact legacy block before setup
+    # is rerun, but still refuses any user-edited variant.
+    legacy_remove = tmp / "legacy-remove"
+    (legacy_remove / "bin").mkdir(parents=True)
+    (legacy_remove / "runtime").mkdir()
+    legacy_env = environment(legacy_remove)
+    legacy_launcher = legacy_remove / "bin" / "window-ward"
+    legacy_launcher.symlink_to(ROOT / "bin" / "window-ward")
+    legacy_bindings = legacy_remove / "bindings.lua"
+    legacy_bindings.write_bytes(integration.legacy_binding_block(legacy_launcher) + b"\n")
+    checked([sys.executable, "-B", str(ROOT / "scripts" / "uninstall")], legacy_env)
+    assert not legacy_launcher.exists()
+    assert integration.BEGIN.encode() not in legacy_bindings.read_bytes()
+
+    # Similar-looking legacy blocks are user-owned once edited: neither setup
+    # nor uninstall may normalize or remove them by guessing intent.
+    edited_legacy = tmp / "edited-legacy"
+    (edited_legacy / "bin").mkdir(parents=True)
+    (edited_legacy / "runtime").mkdir()
+    edited_env = environment(edited_legacy)
+    edited_launcher = edited_legacy / "bin" / "window-ward"
+    edited_bindings = edited_legacy / "bindings.lua"
+    edited_contents = integration.legacy_binding_block(edited_launcher).replace(
+        b'"Close window safely"', b'"My close command"'
+    ) + b"\n"
+    edited_bindings.write_bytes(edited_contents)
+    failed = subprocess.run(
+        [sys.executable, "-B", str(ROOT / "scripts" / "setup")],
+        env=edited_env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        timeout=3,
+    )
+    assert failed.returncode != 0
+    assert edited_bindings.read_bytes() == edited_contents
+    assert not edited_launcher.exists()
+    edited_launcher.symlink_to(ROOT / "bin" / "window-ward")
+    failed = subprocess.run(
+        [sys.executable, "-B", str(ROOT / "scripts" / "uninstall")],
+        env=edited_env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        timeout=3,
+    )
+    assert failed.returncode != 0
+    assert edited_bindings.read_bytes() == edited_contents
+    assert edited_launcher.is_symlink()
 
     # FIFO input is rejected, not opened indefinitely before fstat validation.
     fifo = tmp / "bindings.lua"

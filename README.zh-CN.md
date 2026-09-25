@@ -2,7 +2,7 @@
 
 [English](README.md) | **简体中文** | [日本語](README.ja.md)
 
-Window Ward 可保护指定应用免受意外触发 `Super+W` 的影响。首次按下会发出警告；在配置的时间间隔内，对同一窗口再次按下该快捷键则会正常关闭窗口。
+Window Ward 可保护指定应用免受意外触发 `Super+W` 或 `Super+Q` 的影响。首次执行受保护的关闭命令会发出警告；在配置的时间间隔内，对同一窗口再次按下任一快捷键则会正常关闭窗口。
 
 [在 Omarchy 插件市场查看 Window Ward](https://omarchyplugins.com/plugin.html?id=io.github.r404r.window-ward)。
 
@@ -10,7 +10,7 @@ Window Ward 可保护指定应用免受意外触发 `Super+W` 的影响。首次
 
 ## 要求
 
-- 兼容目标：Omarchy 4.0.1 / Hyprland 0.56.2；0.4.0 候选发布前仍须独立完成官方安装与真实运行验收。
+- 兼容目标：Omarchy 4.0.4 / Hyprland 0.56.2；0.4.1 候选发布前仍须独立完成官方安装与真实运行验收。
 - Python 3.10 或更高版本，以及 hyprctl
 
 ## 安装
@@ -24,6 +24,11 @@ hyprctl configerrors
 
 第二条命令特意写明：Omarchy 插件没有安装钩子。它会向用户拥有的 Hyprland 绑定添加一个带标记的小块，并先备份该文件。
 它拒绝替换现有的 `~/.local/bin/window-ward` 文件或已修改的受管理块。
+该受管理块会明确接管 `Super+W` 和 `Super+Q`。在尚未将 `Super+Q` 设为默认关闭快捷键的旧版 Omarchy 上，setup 会把它新增为受保护的关闭快捷键；如果你已有个人 `Super+Q` 绑定，请先处理冲突再运行 setup。
+
+从 0.4.0 更新后，请再次运行 setup 命令，然后执行 `hyprctl reload`。setup 只识别精确的旧版仅 W 受管理块，先备份，再以原子方式迁移成同时保护 W 和 Q；已编辑或未知的块仍会被拒绝。
+
+从 0.4.1 降级前，请先运行 0.4.1 的 `scripts/uninstall`；0.4.0 的卸载器无法识别新版双快捷键受管理块。之后再安装旧版本并重新运行其 setup。
 
 ## 配置
 
@@ -48,7 +53,7 @@ window-ward doctor
 ### 确认时限与通知关闭
 
 `window-ward timeout 3000` 将 `confirmWindowMs` 设为 3000 毫秒，即对同一窗口再次按
-`Super+W` 可确认关闭的时间间隔。超时本身不会关闭应用。CLI 也用这个值请求通知时长，
+任一受保护关闭快捷键可确认关闭的时间间隔。超时本身不会关闭应用。CLI 也用这个值请求通知时长，
 但实际显示多久由通知服务决定。
 
 2026-09-05 检查的 Omarchy 通知实现对普通通知设定至少 8 秒、最多 30 秒，鼠标悬停时

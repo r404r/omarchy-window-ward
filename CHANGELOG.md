@@ -1,6 +1,13 @@
 # Changelog
 
-## 0.4.0 - Unreleased
+## 0.4.1 - Unreleased
+
+- Protect both current Omarchy close chords, `Super+W` and `Super+Q`, while
+  retaining the binding syntax supported by Omarchy 4.0.4.
+- Safely migrate the exact 0.4.0 W-only managed block during explicit setup;
+  uninstall accepts either exact generated form and still rejects user edits.
+
+## 0.4.0 - 2026-09-05
 
 - Normalize first-run defaults and preserve existing application rules when adding
   a focused application; reject ambiguous replacement instead of losing protection.
